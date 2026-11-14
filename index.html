@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Second Voice</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="rail" aria-label="Main">
+      <a class="brand" href="#today">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>
+          <span class="brand-name">Second <em>Voice</em></span>
+          <span class="brand-sub">B2 → C1 speaking studio</span>
+        </span>
+      </a>
+      <nav>
+        <ul class="nav" id="nav">
+          <li><a href="#today"><span class="mono">01</span>Today<span class="badge" data-badge="today" hidden></span></a></li>
+          <li><a href="#lab"><span class="mono">02</span>Word Lab<span class="badge" data-badge="lab" hidden></span></a></li>
+          <li><a href="#plan"><span class="mono">03</span>12-week plan</a></li>
+          <li><a href="#speak"><span class="mono">04</span>Speak</a></li>
+          <li><a href="#shadow"><span class="mono">05</span>Shadow &amp; sounds</a></li>
+          <li><a href="#words"><span class="mono">06</span>Vault<span class="badge" data-badge="words" hidden></span></a></li>
+          <li><a href="#write"><span class="mono">07</span>Write</a></li>
+          <li><a href="#traps"><span class="mono">08</span>Turkish traps</a></li>
+          <li><a href="#library"><span class="mono">09</span>Immersion</a></li>
+          <li><a href="#prefs"><span class="mono">10</span>Preferences</a></li>
+        </ul>
+      </nav>
+      <div class="rail-foot">
+        <span class="pill" id="sync-pill"><span class="dot"></span><span>Saved on this device</span></span>
+        <span class="pill" id="ai-pill"><span class="dot"></span><span>AI coach: connecting…</span></span>
+        <span class="pill" id="coach-pill" hidden><span class="dot"></span><span>Coach</span></span>
+      </div>
+    </aside>
+
+    <header class="mobile-top">
+      <a class="brand" href="#today">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-name">Second <em>Voice</em></span>
+      </a>
+      <nav aria-label="Main (mobile)"><ul class="nav" id="nav-m"></ul></nav>
+    </header>
+
+    <main class="main" id="main">
+      <section class="view" id="v-today" aria-label="Today"></section>
+      <section class="view" id="v-lab" aria-label="Word Lab" hidden></section>
+      <section class="view" id="v-plan" aria-label="12-week plan" hidden></section>
+      <section class="view" id="v-speak" aria-label="Speak" hidden></section>
+      <section class="view" id="v-shadow" aria-label="Shadow and sounds" hidden></section>
+      <section class="view" id="v-words" aria-label="Vault" hidden></section>
+      <section class="view" id="v-write" aria-label="Write" hidden></section>
+      <section class="view" id="v-traps" aria-label="Turkish traps" hidden></section>
+      <section class="view" id="v-library" aria-label="Immersion" hidden></section>
+      <section class="view" id="v-prefs" aria-label="Preferences" hidden></section>
+    </main>
+  </div>
+  <div class="toast-wrap" id="toasts" aria-live="polite"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

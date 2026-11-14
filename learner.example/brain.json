@@ -1,0 +1,19 @@
+{
+  "updated": "",
+  "sessions": 0,
+  "last_review": "",
+  "areas": {
+    "speak": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "shadow": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "listen": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "read": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "write": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "words": { "level": "", "confidence": "low", "minutes": 0, "note": "" },
+    "people": { "minutes": 0, "note": "" }
+  },
+  "errors": [],
+  "words": [],
+  "scenes": {},
+  "strengths": [],
+  "streak": { "current": 0, "last_day": "" }
+}

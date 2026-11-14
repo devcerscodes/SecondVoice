@@ -1,0 +1,11 @@
+# Personal learner data: the coach's memory. Never commit it.
+learner/
+
+# Local editor and agent state
+.claude/.cc-writes/
+.claude/settings.local.json
+
+.DS_Store
+node_modules/
+.env
+.env.*
