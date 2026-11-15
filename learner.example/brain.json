@@ -15,5 +15,6 @@
   "words": [],
   "scenes": {},
   "strengths": [],
-  "streak": { "current": 0, "last_day": "" }
+  "streak": { "current": 0, "last_day": "" },
+  "coach": { "agent": "", "last_seen": "" }
 }

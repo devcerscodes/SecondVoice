@@ -2,7 +2,7 @@
 
 Goal: create `learner/` and a first backlog in about 10 minutes. Ask one or two questions at a time, in English. Switch to the learner's language if they struggle.
 
-1. Copy `learner.example/` to `learner/`, all files, keeping their shapes. Set `profile.started` and `brain.updated` to today.
+1. Copy `learner.example/` to `learner/`, all files, keeping their shapes. Set `profile.started` and `brain.updated` to today, and sign `brain.coach` with your product name (`coach/brain.md`, step 7).
 2. Ask the following, and fill in `profile.json`:
    - name, native language, and the language explanations should be in
    - where they use English or will need it (job, moving abroad, an exam, travel)

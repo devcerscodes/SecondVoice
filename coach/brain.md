@@ -40,7 +40,7 @@ Empty versions of these files are in `learner.example/`. Keep their shapes: the 
    - If it's older, set `current` to 1.
 
    Then set `last_day` to today.
-7. **Sessions and date.** Add 1 to `brain.sessions` at most once a day, and set `brain.updated`.
+7. **Sessions and date.** Add 1 to `brain.sessions` at most once a day, and set `brain.updated`. Set `brain.coach` to `{ "agent": "<your product name>", "last_seen": "<today>" }`, for example `"Claude Code"`, `"Codex"`, `"Gemini CLI"` or `"Cursor"`. The app's Connect page shows it. Never write an account, email or model id there.
 8. **Backlog.** Rebuild it (below).
 
 ### Shapes
