@@ -125,11 +125,13 @@
   /* Per-person state in the artifact's db, when the page runs on claude.ai.
      The word collection lives in its own document so it can grow. */
   const Cloud = {
-    ref: null, lexRef: null, lexDirty: false, busy: false, again: false, t: 0, state: 'local',
+    ref: null, lexRef: null, lexDirty: false, busy: false, again: false, t: 0, state: 'local', who: '',
     async init() {
       if (!window.claude?.use) { this.set('local'); return; }
       try {
         const [db, user] = await Promise.all([claude.use('db'), claude.use('user')]);
+        // The signed-in name, shown on Connect. "" unless the page declares the user "profile" scope.
+        user?.me().then((m) => { this.who = str(m?.name, 80); refreshConnect(); }, () => {});
         if (!db || !user) { this.set('local'); return; }
         const id = await user.id();
         if (!id) { this.set('local'); return; }
@@ -190,6 +192,7 @@
       const map = { local: ['', 'Saved on this device'], cloud: ['on', 'Synced to your account'], offline: ['warn', 'Sync paused, saved locally'] };
       const [c, t] = map[s];
       const p = $('#sync-pill'); if (p) p.innerHTML = `<span class="dot ${c}"></span><span>${t}</span>`;
+      refreshConnect();
     }
   };
 
@@ -228,15 +231,20 @@
     /* Called when the learner comes back to the tab: the agent may have updated the files. */
     async refresh() {
       if (!(await this.load())) return;
-      if (['today', 'plan'].includes(current)) R[current]();
+      if (['today', 'plan', 'connect'].includes(current)) R[current]();
       updateChrome();
     },
     on() { return this.state === 'ok'; },
+    /* The coach writes its own name into brain.coach (see coach/brain.md). The page can't detect it otherwise. */
+    agent() {
+      const c = this.brain?.coach;
+      return { name: str(c?.agent, 40), seen: /^\d{4}-\d{2}-\d{2}$/.test(String(c?.last_seen || '')) ? c.last_seen : '' };
+    },
     pill() {
       const p = $('#coach-pill'); if (!p) return;
       p.hidden = !this.local && !this.on();
-      const up = ageLabel(this.brain?.updated || this.backlog?.updated);
-      const [c, t] = this.on() ? ['on', `Coach files loaded${up ? ' · ' + up : ''}`] : this.state === 'bad' ? ['warn', `Coach: can't read ${this.err}`] : ['', 'Coach: not set up yet'];
+      const up = ageLabel(this.brain?.updated || this.backlog?.updated), who = this.agent().name;
+      const [c, t] = this.on() ? ['on', `${who ? 'Coach: ' + who : 'Coach files loaded'}${up ? ' · ' + up : ''}`] : this.state === 'bad' ? ['warn', `Coach: can't read ${this.err}`] : ['', 'Coach: not set up yet'];
       p.innerHTML = `<span class="dot ${c}"></span><span>${esc(t)}</span>`;
     }
   };
@@ -436,20 +444,27 @@
   const onAir = (on) => $$('.onair').forEach((x) => x.classList.toggle('live', on));
 
   /* ================= AI coach ================= */
+  /* Two ways in: on claude.ai the page's own AI; on localhost the learner's agent, through server.js. */
   const AI = {
-    s: null, state: 'pending',
+    s: null, state: 'pending', via: null,
     init() {
-      if (!window.claude?.use) { this.set('off'); return; }
-      claude.use('sample').then((s) => { this.s = s; this.set(s ? 'on' : 'off'); }).catch(() => this.set('off'));
+      if (window.claude?.use) {
+        claude.use('sample').then((s) => { this.s = s; this.set(s ? 'on' : 'off'); }).catch(() => this.set('off'));
+      } else if (L.local) {
+        fetch('/api/agent', { cache: 'no-store', headers: { 'X-Second-Voice': '1' } })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((j) => { if (j?.agent) { this.via = j; this.s = localAgent; this.set('on'); } else this.set('off'); })
+          .catch(() => this.set('off'));
+      } else { this.set('off'); return; }
       setTimeout(() => { if (this.state === 'pending') this.set('off'); }, 11000);
     },
     set(st) {
       const changed = this.state !== st;
       this.state = st;
-      const map = { pending: ['', 'AI coach: connecting…'], on: ['on', 'AI coach ready'], off: ['warn', 'AI coach offline'] };
+      const map = { pending: ['', 'AI coach: connecting…'], on: ['on', this.via ? `AI coach: ${this.via.name}` : 'AI coach ready'], off: ['warn', 'AI coach offline'] };
       const [c, t] = map[st];
       const p = $('#ai-pill'); if (p) p.innerHTML = `<span class="dot ${c}"></span><span>${t}</span>`;
-      if (changed && ['speak', 'write', 'words', 'prefs', 'lab'].includes(current)) rerender();
+      if (changed && ['speak', 'write', 'words', 'prefs', 'lab', 'connect'].includes(current)) rerender();
       if (changed && st === 'on' && U.speak.scen && U.speak.stage === 'chat' && !U.speak.msgs.length && !U.speak.busy) aiTurn();
       if (changed && st === 'on' && U.speak.scen?.needsBrief && !U.speak.briefBusy) makeBrief(U.speak.scen);
     },
@@ -459,6 +474,27 @@
       return parseJSON(r?.text);
     }
   };
+  /* A CLI takes one prompt, so a chat (the role-play sends [{role, content}…]) becomes one transcript. */
+  function flatPrompt(input) {
+    if (!Array.isArray(input)) return String(input);
+    const text = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => b?.text || '').join('') : String(c ?? ''));
+    return input.map((m) => `[${m.role === 'assistant' ? 'YOU' : 'USER'}]\n${text(m.content)}`).join('\n\n')
+      + '\n\n[YOU]\nWrite your next message now, following the first USER message\'s instructions and format.';
+  }
+  /* Same shape as claude.ai's sample(): a prompt or a chat in, { text } out. server.js runs the agent's CLI. */
+  async function localAgent(input, o = {}) {
+    let r;
+    try {
+      r = await fetch('/api/ask', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'X-Second-Voice': '1' },
+        body: JSON.stringify({ prompt: flatPrompt(input), tier: o.modelTier || 'default' })
+      });
+    } catch { throw Object.assign(new Error('down'), { code: 'agent_down' }); }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(j.error || 'agent'), { code: j.code || 'agent_failed', detail: j.error || '' });
+    return { text: j.text };
+  }
   function parseJSON(t) {
     t = String(t || '').replace(/```(?:json)?/gi, '');
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
@@ -467,14 +503,17 @@
   }
   function aiError(e) {
     const c = e?.code;
-    if (c === 'off') toast(L.local ? 'Locally, ask your coach in your AI agent instead (see README).' : 'The AI coach works when this page is open on claude.ai.');
+    if (c === 'off' || c === 'no_agent') { if (c === 'no_agent') AI.set('off'); toast(L.local ? 'No AI agent found. Install Claude Code, Codex or Gemini CLI, then restart npm run dev.' : 'The AI coach works when this page is open on claude.ai.', 5000); }
+    else if (c === 'agent_down') toast('The local server is not running. Start it again with npm run dev.', 5000);
+    else if (c === 'timeout') toast('Your agent took too long to answer. Try again.');
+    else if (c === 'agent_failed') toast(`${AI.via?.name || 'Your agent'} could not answer: ${e.detail || 'unknown error'}. See the npm run dev terminal.`, 7000);
     else if (c === 'not_granted') { AI.set('off'); toast('AI access was not allowed for this page.'); }
     else if (c === 'rate_limited') toast('Too many requests in a row. Wait a minute and try again.');
     else if (c === 'parse') toast('The coach answered in an unexpected format. Try again.');
     else toast('The coach could not answer just now. Try again in a moment.');
   }
   const aiNote = () => AI.state === 'on' ? '' : AI.state === 'off' && L.local
-    ? `<div class="note">${I.info}<span><b>The in-page AI coach is off when the app runs locally.</b> Use your coach instead: in your AI agent, opened in this folder, say <i>roleplay</i>, <i>check my writing</i> or <i>review my words</i>. Everything else on this page works as is.</span></div>`
+    ? `<div class="note">${I.info}<span><b>No AI agent found on this computer.</b> The page uses Claude Code, Codex or Gemini CLI when one is installed: install one, sign in, then restart <code>npm run dev</code>. Everything else on this page works as is.</span></div>`
     : `<div class="note">${I.info}<span><b>${AI.state === 'pending' ? 'Connecting to the AI coach…' : 'The AI coach is offline here.'}</b> It runs when this page is open on claude.ai. Everything else on this page works without it.</span></div>`;
   const ctxLine = 'The learner is a Turkish speaker at B2 level (understands films and work English well) aiming for C1 speaking. Explanations meant for the learner are in Turkish; English examples stay in English.';
 
@@ -579,7 +618,7 @@
   addEventListener('resize', () => Wave.resize());
 
   /* ================= Router ================= */
-  const VIEWS = ['today', 'lab', 'plan', 'speak', 'shadow', 'words', 'write', 'traps', 'library', 'prefs'];
+  const VIEWS = ['today', 'lab', 'plan', 'speak', 'shadow', 'words', 'write', 'traps', 'library', 'connect', 'prefs'];
   let current = null;
   const R = {};
   const U = {
@@ -592,6 +631,7 @@
     pr: { set: 'th', cur: null, answered: null, right: 0, total: 0 },
     w: { tab: 'review', queue: null, flipped: false, q: '', tag: 'all', busy: false },
     wr: { tab: 'lab', prompt: pick(D.writePrompts), text: '', busy: false, res: null, nat: '', natRes: null, natBusy: false },
+    cn: { agent: '', pending: null, pendingName: '' },
     tp: null
   };
 
@@ -621,7 +661,10 @@
     $$('[data-badge="words"]').forEach((b) => { b.textContent = due; b.hidden = !due; });
     $$('[data-badge="today"]').forEach((b) => { b.textContent = left; b.hidden = !left; });
     $$('[data-badge="lab"]').forEach((b) => { b.textContent = S.lexicon.length; b.hidden = !S.lexicon.length; });
+    // Locally, flag Connect until the coach has written its files.
+    $$('[data-badge="connect"]').forEach((b) => { b.hidden = !(L.local && !L.on()); });
   }
+  function refreshConnect() { if (current === 'connect') R.connect(); }
   const view = (v) => $('#v-' + v);
   const tabs = (name, items, sel) => `<div class="tabs" role="tablist">${items.map(([k, label]) => `<button role="tab" aria-selected="${k === sel}" data-act="tab" data-group="${name}" data-tab="${k}">${label}</button>`).join('')}</div>`;
   const chipCls = (k) => ({ Vault: 'accent', Shadow: 'listen', Speak: 'accent', Input: '', Write: 'listen', Plan: '', 'Self-talk': 'listen' }[k] || '');
@@ -736,7 +779,7 @@
       <section class="card coach-card">
         <div class="section-title"><h2>Connect your coach</h2><span class="mono">uses the AI you already have</span></div>
         <p class="muted">Open your AI agent (Claude Code, Codex, Gemini CLI…) in this folder and say <b>start</b>. It sets up your profile, takes a short baseline and builds a plan. Your plan, mistakes and words then show up here.</p>
-        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="coach-copy" data-text="start">Copy <code>start</code></button><span class="muted" style="font-size:13px">Your data stays in <code>learner/</code>, on this computer.</span></div>
+        <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="coach-copy" data-text="start">Copy <code>start</code></button><a class="btn sm" href="#connect">Step-by-step guide →</a><span class="muted" style="font-size:13px">Your data stays in <code>learner/</code>, on this computer.</span></div>
       </section>` : '';
     const { items, left, sum } = coachToday();
     const errs = (Array.isArray(L.brain?.errors) ? L.brain.errors : [])
@@ -1084,7 +1127,9 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
     if (L.tab === 'look') {
       if (L.busy) body = `<article class="entry loading" aria-busy="true"><span class="eyebrow">Looking it up…</span><h2 class="entry-word" id="scr">${esc(L.q)}</h2><div class="stack">${[92, 70, 84, 55].map((w) => `<span class="skel" style="width:${w}%"></span>`).join('')}</div></article>`;
       else if (L.entry) body = entryHTML(L.entry);
-      else if (L.err === 'off') body = `<div class="note">${I.info}<span><b>Lookups need the AI coach.</b> It runs when this page is open on claude.ai. Kaydettiğin kelimeler burada yine de açılır.</span></div>`;
+      else if (L.err === 'off') body = L.local
+        ? `<div class="note">${I.info}<span><b>Lookups need your AI agent.</b> Bilgisayarında Claude Code, Codex ya da Gemini CLI bulunamadı. Birini kurup giriş yap, sonra <code>npm run dev</code>'i yeniden başlat. Kaydettiğin kelimeler burada yine de açılır.</span></div>`
+        : `<div class="note">${I.info}<span><b>Lookups need the AI coach.</b> It runs when this page is open on claude.ai. Kaydettiğin kelimeler burada yine de açılır.</span></div>`;
       else if (L.err) body = `<section class="card empty"><h3>${L.err === 'fail' ? 'That lookup did not work' : esc(L.err)}</h3><p>${L.err === 'fail' ? 'Bir daha dene.' : 'Yazımı kontrol et ya da başka bir kelime dene.'}</p></section>`;
       else body = `<section class="lab-empty">
           <div class="spec" aria-hidden="true">
@@ -1436,7 +1481,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (!sp.msgs.length && !sp.busy) {
       html = AI.state === 'on'
         ? '<div class="empty"><h3>Setting the scene…</h3></div>'
-        : `<div class="empty"><h3>Your partner is offline here</h3><p>Yapay zekâ partneri claude.ai üzerinde çalışır. Şimdilik soldaki ifadeleri sesli oku ve iki rolü de kendin canlandır.</p></div>`;
+        : `<div class="empty"><h3>Your partner is offline here</h3><p>${L.local ? 'Yapay zekâ partneri bilgisayarındaki agent ile çalışır (Claude Code, Codex ya da Gemini CLI), ama burada bulunamadı.' : 'Yapay zekâ partneri claude.ai üzerinde çalışır.'} Şimdilik soldaki ifadeleri sesli oku ve iki rolü de kendin canlandır.</p></div>`;
     }
     if (sp.busy) html += '<div class="msg ai"><div class="bubble typing" aria-label="Partner is typing"><i></i><i></i><i></i></div></div>';
     if (sp.err) html += `<div class="row" style="justify-content:center"><span class="muted">${esc(sp.err)}</span><button class="btn sm" data-act="retry">Try again</button></div>`;
@@ -1657,7 +1702,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
             <div class="row golive-row">
               <button class="btn primary golive" data-act="go-live" ${busy ? 'disabled' : ''}><span class="light"></span>Go on air</button>
               ${D.phrasebook.some((p) => p.scene === sc.id) ? `<button class="btn" data-act="pb-open" data-id="${D.phrasebook.find((p) => p.scene === sc.id).id}">${I.book} Full phrasebook</button>` : ''}
-              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.` : 'AI partner claude.ai üzerinde çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.'}</span>
+              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.` : `AI partner ${L.local ? 'bilgisayarındaki agent ile' : 'claude.ai üzerinde'} çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.`}</span>
             </div>
           </div>
         </section>`;
@@ -2038,19 +2083,161 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
           <div class="note" id="voice-hint"></div>
         </div>
         <div class="card stack">
-          <h3>Status</h3>
+          <h3>Coach, sync &amp; backup</h3>
           <div class="row">${$('#sync-pill').outerHTML.replace('id="sync-pill"', '')}${$('#ai-pill').outerHTML.replace('id="ai-pill"', '')}</div>
-          <p class="muted" style="font-size:14px">claude.ai üzerinde ilerlemen hesabına kaydedilir ve tüm cihazlarında aynı olur. Mikrofon bu sayfa içinde engelli olabilir: o zaman klavyedeki dikteyi kullan (Mac'te Fn tuşuna iki kez bas, telefonda klavyedeki mikrofon).</p>
+          <p class="muted" style="font-size:14px">AI agent bağlantısı, ilerlemenin nerede saklandığı, yedek alma ve geri yükleme artık Connect sayfasında.</p>
+          <div class="row"><a class="btn" href="#connect">Open Connect →</a></div>
         </div>
         <div class="card stack">
-          <h3>Backup</h3>
-          <p class="muted" style="font-size:14px">İlerlemenin bir kopyasını al ya da geri yükle.</p>
-          <div class="row"><button class="btn" data-act="export">Copy progress</button></div>
-          <div class="field"><label for="p-import">Paste a backup</label><textarea class="input" id="p-import" rows="3" placeholder='{"v":1, ...}'></textarea></div>
-          <div class="row"><button class="btn" data-act="import">Restore backup</button><span class="spacer"></span><button class="btn ghost" data-act="reset" style="color:var(--bad)">Erase all progress</button></div>
+          <h3>Microphone</h3>
+          <p class="muted" style="font-size:14px">Mikrofon bu sayfa içinde engelli olabilir: o zaman klavyedeki dikteyi kullan (Mac'te Fn tuşuna iki kez bas, telefonda klavyedeki mikrofon).</p>
         </div>
       </section>`;
     fillVoices();
+  };
+
+  /* ================= Connect =================
+     Where the AI comes from and where progress is kept. The page can't see the agent itself:
+     it only sees the files the agent writes in learner/, and the agent signs them in brain.coach. */
+  const AGENTS = [
+    { id: 'claude', name: 'Claude Code', cmd: 'claude', acct: '/status', acctNote: 'agent içinde yaz' },
+    { id: 'codex', name: 'Codex', cmd: 'codex', acct: 'codex login status', acctNote: 'terminalde çalıştır' },
+    { id: 'gemini', name: 'Gemini CLI', cmd: 'gemini', acct: '', acctNote: '' },
+    { id: 'cursor', name: 'Cursor', cmd: '', acct: '', acctNote: '' }
+  ];
+  const copyBtn = (text, label = '') => `<button class="btn sm cmd" data-act="copy" data-text="${esc(text)}" title="Copy">${label || `<code>${esc(text)}</code>`}<span class="cmd-ico" aria-hidden="true">⧉</span></button>`;
+  function backupSummary(o) {
+    const n = (x) => (x && typeof x === 'object' ? (Array.isArray(x) ? x.length : Object.keys(x).length) : 0);
+    const when = +o.updated ? new Date(+o.updated).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    return [`${n(o.days)} active days`, `${n(o.lexicon)} Word Lab words`, `${n(o.cards)} Vault cards practised`, n(o.custom) && `${n(o.custom)} own phrases`, when && `last change ${when}`].filter(Boolean).join(' · ');
+  }
+  /* A backup is the state object itself (what "Copy as text" and "Download progress" produce). */
+  function parseBackup(txt) {
+    try {
+      const o = JSON.parse(String(txt || ''));
+      return o && typeof o === 'object' && !Array.isArray(o) && o.days && typeof o.days === 'object' ? o : null;
+    } catch { return null; }
+  }
+  function restoreBackup(o) {
+    S = normalize(o); U.w.queue = null; U.lab.quiz = null; U.lab.entry = null;
+    saveLex(); toast(`Backup restored: ${backupSummary(S)}.`, 5000); rerender();
+  }
+  R.connect = () => {
+    const ag = L.agent(), up = ageLabel(L.brain?.updated || L.backlog?.updated);
+    const aiOn = AI.state === 'on', pending = AI.state === 'pending';
+    const known = AGENTS.find((a) => ag.name && a.name.toLowerCase() === ag.name.toLowerCase());
+    const sel = U.cn.agent || known?.id || 'claude', A0 = AGENTS.find((a) => a.id === sel) || AGENTS[0];
+
+    /* 1. The three connections, the same ones the sidebar pills show. */
+    const coachCard = (() => {
+      if (!L.local) return { dot: '', state: 'Only on your computer', body: `<p>Agent koç, uygulama bilgisayarında çalışırken (<code>npm run dev</code>, localhost) bağlanır. Bu sayfa claude.ai'de açık olduğu için burada görünmez.</p>` };
+      if (L.state === 'bad') return { dot: 'warn', state: `Can't read ${esc(L.err)}`, body: `<p><code>learner/${esc(L.err)}</code> geçerli bir JSON değil. Agent'ına şunu söyle: <i>"learner/${esc(L.err)} is broken, please repair it."</i></p>` };
+      if (!L.on()) return { dot: '', state: 'Not connected yet', body: `<p>Henüz bir agent <code>learner/</code> dosyalarını yazmadı. Aşağıdaki adımları izle, iki dakika sürer.</p>` };
+      return {
+        dot: 'on', state: ag.name ? esc(ag.name) : 'Connected',
+        body: `<dl class="kv">
+            <dt>Agent</dt><dd>${ag.name ? esc(ag.name) : '<span class="muted">Adını henüz yazmadı. Bir sonraki aktiviteden sonra görünür.</span>'}</dd>
+            <dt>Last active</dt><dd>${esc(ageLabel(ag.seen) || up || '—')}</dd>
+            <dt>Account</dt><dd>${known?.acct ? `Sayfa bunu göremez. Kontrol için ${copyBtn(known.acct)} <span class="muted">(${known.acctNote})</span>` : '<span class="muted">Sayfa bunu göremez. Agent\'ın ayarlarında kontrol et.</span>'}</dd>
+          </dl>`
+      };
+    })();
+    const aiCard = aiOn && AI.via
+      ? { dot: 'on', state: esc(AI.via.name), body: `<dl class="kv"><dt>Runs on</dt><dd>${esc(AI.via.name)}, bu bilgisayarda</dd><dt>Account</dt><dd>Agent'ın kendi girişi. API anahtarı gerekmez.</dd></dl><p class="muted">Word Lab araması, role-play sohbeti ve yazı geri bildirimi <code>npm run dev</code> üzerinden agent'ına gider. Başka bir agent seçmek için: <code>SV_AGENT=codex npm run dev</code>.</p>` }
+      : aiOn
+      ? { dot: 'on', state: 'Ready', body: `<dl class="kv"><dt>Runs on</dt><dd>claude.ai, Claude hesabınla</dd><dt>Signed in as</dt><dd>${Cloud.who ? esc(Cloud.who) : '<span class="muted">Claude hesabın (ad bu sayfayla paylaşılmadı)</span>'}</dd></dl><p class="muted">Word Lab araması, role-play sohbeti ve yazı geri bildirimi bununla çalışır.</p>` }
+      : pending ? { dot: '', state: 'Connecting…', body: '<p>claude.ai bağlantısı bekleniyor.</p>' }
+      : L.local ? { dot: 'warn', state: 'No agent found', body: `<p>Sayfa içi koç (Word Lab araması, role-play sohbeti, yazı geri bildirimi) bilgisayarındaki agent ile çalışır, ama <code>npm run dev</code> Claude Code, Codex ya da Gemini CLI bulamadı. Birini kurup giriş yap ve sunucuyu yeniden başlat.</p>` }
+      : { dot: 'warn', state: 'Offline', body: '<p>Yapay zekâ izni verilmedi ya da bağlantı kurulamadı. Sayfayı yenile; izin sorulursa onayla.</p>' };
+    const syncCard = Cloud.state === 'cloud'
+      ? { dot: 'on', state: 'Synced to your account', body: '<p>İlerlemen claude.ai hesabına kaydediliyor. Bu linki açtığın her cihazda aynı.</p>' }
+      : Cloud.state === 'offline'
+        ? { dot: 'warn', state: 'Sync paused', body: '<p>Hesaba bağlanılamadı. İlerlemen şimdilik bu tarayıcıda; bağlantı gelince eşitlenir.</p>' }
+        : { dot: '', state: 'This browser only', body: `<p>İlerlemen bu tarayıcıda, <code>${esc(location.host || 'this page')}</code> adresine bağlı olarak saklanıyor. Başka tarayıcı ya da adres onu görmez. Taşımak için aşağıdan yedek indir.</p>` };
+    const tile = (k, title, c) => `
+      <article class="card conn-card" data-conn="${k}">
+        <div class="conn-top"><span class="mono">${title}</span><span class="pill"><span class="dot ${c.dot}"></span><span>${c.state}</span></span></div>
+        <div class="conn-body">${c.body}</div>
+      </article>`;
+
+    /* 2. The guide. Step 0 is done when the page already runs locally. */
+    const steps = [
+      { done: L.local, t: 'Run the app on your computer', d: `Second Voice klasöründe bir terminal aç ve sunucuyu başlat, sonra <code>http://localhost:5173</code> adresini aç.${L.local ? ' <b>Şu an buradasın.</b>' : ''}`, act: copyBtn('npm run dev') },
+      { done: L.on(), t: `Open ${esc(A0.name)} in the same folder`, d: A0.cmd ? `Aynı klasörde ikinci bir terminal aç ve ${esc(A0.name)}'u başlat. Koç talimatlarını (<code>AGENTS.md</code>) kendisi okur, API anahtarı gerekmez.` : `${esc(A0.name)}'da <b>File → Open Folder</b> ile Second Voice klasörünü aç, sonra sohbet panelini kullan. Koç talimatlarını (<code>AGENTS.md</code>) kendisi okur.`, act: A0.cmd ? copyBtn(A0.cmd) : '' },
+      { done: L.on(), t: 'Say “start”', d: 'Koç birkaç soru sorar, kısa bir seviye ölçümü yapar ve <code>learner/</code> klasörünü kurar. Hafızası bu dosyalardır.', act: copyBtn('start') },
+      { done: L.on(), t: 'Come back to this tab', d: 'Sayfa <code>learner/</code> dosyalarını kendisi okur. Sekmeye dönünce soldaki rozet yeşile döner ve agent\'ın adı görünür.', act: L.local ? `<button class="btn sm" data-act="coach-check">Check now</button>` : '' }
+    ];
+    const guide = `
+      <section class="card stack conn-guide" id="guide">
+        <div class="section-title"><h2>Connect an AI agent</h2><span class="mono">${L.on() ? 'connected' : 'about 2 minutes'}</span></div>
+        <p class="muted">Koç, zaten kullandığın AI agent'ı. Agent bu klasördeki dosyaları okuyup yazar, sayfa da bu dosyaları gösterir. Ayrı bir hesap, sunucu ya da API anahtarı yok.</p>
+        <div class="agent-pick" role="radiogroup" aria-label="Your AI agent">${AGENTS.map((a) => `<button role="radio" aria-checked="${a.id === sel}" data-act="cn-agent" data-id="${a.id}">${esc(a.name)}</button>`).join('')}</div>
+        <ol class="cn-steps">${steps.map((s, i) => `
+          <li class="${s.done ? 'done' : ''}">
+            <span class="step-n" aria-hidden="true">${s.done ? I.check : i + 1}</span>
+            <div class="step-b"><b>${s.t}</b><p class="muted">${s.d}</p></div>
+            <div class="step-a">${s.act}</div>
+          </li>`).join('')}
+        </ol>
+        <div class="stack" style="gap:8px">
+          <span class="mono muted">Then, any day · say these to your agent</span>
+          <div class="row" style="gap:6px">${['today', 'roleplay', 'check my writing', 'review my words', 'weekly review', 'wrap up'].map((x) => copyBtn(x)).join('')}</div>
+        </div>
+      </section>`;
+
+    /* 3. Where each kind of data lives. */
+    const where = [
+      { on: true, t: 'This browser', what: 'Today görevleri, Vault kartları, Word Lab kelimeleri, quiz skorları, ses ayarları', fmt: `JSON · localStorage <code>${LS}</code>`, note: `Adrese bağlı: <code>${esc(location.host || 'this page')}</code>. localhost ile claude.ai birbirini görmez.` },
+      { on: Cloud.state === 'cloud', t: 'Your claude.ai account', what: 'Tarayıcıdakinin aynısı, cihazlar arası eşitlenir', fmt: 'JSON · sayfanın veritabanı, sadece sana açık', note: 'Sadece sayfa claude.ai\'de açıkken.' },
+      { on: L.on(), t: 'learner/ folder', what: 'Koçun hafızası: profil, hatalar, kelimeler, sıradaki işler, günlükler', fmt: 'JSON + Markdown · <code>profile.json</code> <code>brain.json</code> <code>backlog.json</code> <code>journal/*.md</code> <code>reviews/*.md</code>', note: 'Agent yazar, sayfa sadece okur. Bilgisayarında kalır, git\'e girmez.' }
+    ];
+    const pend = U.cn.pending;
+
+    view('connect').innerHTML = `
+      <header class="page-head">
+        <div class="eyebrow"><span>Connect</span><b>${[L.on() ? 'agent connected' : L.local ? 'agent not connected' : '', aiOn ? 'in-page AI on' : '', Cloud.state === 'cloud' ? 'synced' : 'saved in this browser'].filter(Boolean).join(' · ')}</b></div>
+        <h1 class="h-rise">${words('Connect your coach.')} <span class="sub">${words('See where it all lives.', 140)}</span></h1>
+        <p class="lead">Second Voice iki yerden yapay zekâ alır: bilgisayarındaki AI agent ve claude.ai'deki sayfa içi koç. İlerlemen de üç yerde durabilir. Hepsi burada.</p>
+      </header>
+      <section class="conn-grid">
+        ${tile('coach', 'AI agent coach', coachCard)}
+        ${tile('ai', AI.via ? 'In-page AI · your agent' : 'In-page AI · claude.ai', aiCard)}
+        ${tile('sync', 'Progress', syncCard)}
+      </section>
+      ${guide}
+      <section class="stack">
+        <div class="section-title"><h2>Where your data lives</h2><span class="mono">plain JSON and Markdown</span></div>
+        <div class="cn-where">${where.map((w) => `
+          <div class="where-row${w.on ? ' on' : ''}">
+            <div class="where-t"><b>${w.t}</b>${w.on ? '<span class="chip good">in use</span>' : '<span class="chip">not here</span>'}</div>
+            <div class="where-what">${w.what}</div>
+            <div class="where-fmt mono">${w.fmt}</div>
+            <div class="where-note muted">${w.note}</div>
+          </div>`).join('')}
+        </div>
+      </section>
+      <section class="card stack" id="backup">
+        <div class="section-title"><h2>Back up &amp; move</h2><span class="mono">${esc(backupSummary(S))}</span></div>
+        <p class="muted">İlerlemeni tek bir <code>.json</code> dosyası olarak indir. Başka bir tarayıcıya, bilgisayara ya da localhost ile claude.ai arasında taşımak için orada geri yükle. <code>learner/</code> klasörü bu dosyaya dahil değil: o zaten bilgisayarındaki dosyalar.</p>
+        <div class="row">
+          <button class="btn primary" data-act="backup-download">${I.plus} Download progress</button>
+          <label class="btn">Restore from file…<input type="file" accept=".json,application/json" data-file="restore" hidden></label>
+          <button class="btn ghost" data-act="export">Copy as text</button>
+        </div>
+        ${pend ? `
+          <div class="restore-box">
+            <div><b>${esc(U.cn.pendingName)}</b><div class="muted">${esc(backupSummary(pend))}</div></div>
+            <p class="muted">Geri yüklersen bu tarayıcıdaki ilerlemenin yerine geçer${Cloud.state === 'cloud' ? ' ve hesabına da eşitlenir' : ''}. Önce mevcut olanı indirmen iyi olur.</p>
+            <div class="row"><button class="btn primary" data-act="backup-restore">Replace my progress</button><button class="btn ghost" data-act="backup-cancel">Cancel</button></div>
+          </div>` : ''}
+        <details class="paste">
+          <summary>Paste a backup as text</summary>
+          <div class="stack" style="margin-top:10px">
+            <textarea class="input" id="p-import" rows="3" placeholder='{"v":1, ...}'></textarea>
+            <div class="row"><button class="btn" data-act="import">Restore from text</button><span class="spacer"></span><button class="btn ghost" data-act="reset" style="color:var(--bad)">Erase all progress</button></div>
+          </div>
+        </details>
+      </section>`;
   };
 
   /* ================= Actions ================= */
@@ -2257,15 +2444,47 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     'trap-restart'() { newTrapRound(); R.traps(); },
     async export(t) {
       try { await navigator.clipboard.writeText(JSON.stringify(S)); toast('Progress copied. Paste it somewhere safe.'); }
-      catch { toast('Copy was blocked here. Select the backup box text instead.'); $('#p-import').value = JSON.stringify(S); $('#p-import').select(); }
+      catch {
+        toast('Copy was blocked here. Select the backup box text instead.');
+        const box = $('#p-import'); if (!box) return;
+        box.closest('details').open = true; box.value = JSON.stringify(S); box.select();
+      }
     },
     import() {
-      try {
-        const o = JSON.parse($('#p-import').value);
-        if (!o || typeof o !== 'object' || !o.days) throw 0;
-        S = normalize(o); saveLex(); toast('Backup restored.'); rerender();
-      } catch { toast('That does not look like a Second Voice backup.'); }
+      const o = parseBackup($('#p-import')?.value);
+      if (!o) { toast('That does not look like a Second Voice backup.'); return; }
+      restoreBackup(o);
     },
+    async copy(t) {
+      const text = t.dataset.text || '';
+      try { await navigator.clipboard.writeText(text); toast(`Copied “${text}”.`); }
+      catch { toast(`Copy was blocked. Type it yourself: ${text}`, 6000); }
+    },
+    'cn-agent'(t) { U.cn.agent = t.dataset.id; R.connect(); },
+    async 'coach-check'(t) {
+      t.disabled = true;
+      const changed = await L.load().catch(() => false);
+      updateChrome(); R.connect();
+      toast(L.on() ? (changed ? 'Coach files found.' : 'Connected. Nothing new since the last check.') : 'No coach files yet. Say “start” to your agent first.');
+    },
+    async 'backup-download'() {
+      const filename = `second-voice-progress-${todayKey()}.json`, data = JSON.stringify(S, null, 2);
+      // On claude.ai the page runs in a frame: the platform's save dialog is the reliable way out.
+      const dl = window.claude?.use ? await claude.use('downloads').catch(() => null) : null;
+      if (dl) {
+        try { const r = await dl.save({ filename, data }); if (r?.status === 'saved') toast(`Saved ${filename}.`); return; }
+        catch (e) { if (e?.code === 'declined') return; if (e?.code === 'rate_limited') { toast('A save dialog is already open.'); return; } }
+      }
+      try {
+        const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+        const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+        document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        toast(`Downloaded ${filename}.`);
+      } catch { A.export(); }
+    },
+    'backup-restore'() { const o = U.cn.pending; U.cn.pending = null; if (o) restoreBackup(o); else R.connect(); },
+    'backup-cancel'() { U.cn.pending = null; R.connect(); },
     reset(t) {
       if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Click again to erase everything'; setTimeout(() => { if (t.isConnected) { delete t.dataset.armed; t.textContent = 'Erase all progress'; } }, 4000); return; }
       S = normalize({ name: S.name, voice: S.voice, rate: S.rate }); U.w.queue = null; U.lab.quiz = null; U.lab.entry = null; saveLex(); toast('All progress erased. Fresh start.'); rerender();
@@ -2310,7 +2529,20 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (t.id === 'p-rate') { $('#p-rate-v').textContent = (+t.value).toFixed(2) + '×'; }
   });
   document.addEventListener('change', (e) => {
-    const t = e.target, p = t.dataset?.pref; if (!p) return;
+    const t = e.target;
+    if (t.dataset?.file === 'restore') {
+      const f = t.files?.[0]; t.value = '';
+      if (!f) return;
+      if (f.size > 20 * 1024 * 1024) { toast('That file is too big to be a Second Voice backup.'); return; }
+      f.text().then((txt) => {
+        const o = parseBackup(txt);
+        if (!o) { toast('That does not look like a Second Voice backup.'); return; }
+        U.cn.pending = o; U.cn.pendingName = f.name; R.connect();
+        $('.restore-box')?.scrollIntoView({ block: 'nearest', behavior: reduced ? 'auto' : 'smooth' });
+      }, () => toast('Could not read that file.'));
+      return;
+    }
+    const p = t.dataset?.pref; if (!p) return;
     if (p === 'name') S.name = t.value.trim().slice(0, 40);
     if (p === 'start' && /^\d{4}-\d{2}-\d{2}$/.test(t.value)) S.start = t.value;
     if (p === 'voice') { S.voice = t.value; fillVoices(); }

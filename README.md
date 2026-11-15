@@ -83,4 +83,9 @@ When you run the app locally, its Today page reads `learner/` and shows a **From
 
 The app only reads these files; the coach writes them. Switch back to the browser tab after a session and the card updates.
 
-Some app screens (the Word Lab lookup, Write feedback, the role-play chat) use AI only in the hosted claude.ai version. Locally, use the coach for those.
+Some app screens (the Word Lab lookup, Write feedback, the role-play chat) need AI. On claude.ai they use the page's own AI. Locally, `npm run dev` hands them to your agent: the server runs Claude Code, Codex or Gemini CLI in headless mode (`claude -p`, `codex exec`, `gemini -p`) with your existing login, and the page shows the answer. No API key needed.
+
+- The first agent found wins, in that order. Pick one with `SV_AGENT=codex npm run dev`, and a model with `SV_MODEL=…`.
+- The agent runs with no tools, in an empty temporary folder, so it can't read or change your files.
+- Only this page can use it: the server listens on 127.0.0.1 and refuses requests from other sites.
+- Each request uses your agent plan like any other prompt.
