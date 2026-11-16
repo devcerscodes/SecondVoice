@@ -89,3 +89,9 @@ Some app screens (the Word Lab lookup, Write feedback, the role-play chat) need 
 - The agent runs with no tools, in an empty temporary folder, so it can't read or change your files.
 - Only this page can use it: the server listens on 127.0.0.1 and refuses requests from other sites.
 - Each request uses your agent plan like any other prompt.
+
+## License
+
+Copyright (C) 2026 devcerscodes
+
+Second Voice is free software under the [GNU Affero General Public License v3.0](LICENSE). Fork it, change it and use it for yourself. If you share a changed version, or run one as a website for others, you must publish your source code under the same license.
