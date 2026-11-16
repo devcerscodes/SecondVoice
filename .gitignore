@@ -5,6 +5,13 @@ learner/
 .claude/.cc-writes/
 .claude/settings.local.json
 
+# Portrait drafts and sources: the app only uses portraits/<id>.jpg
+portraits/explore/
+portraits/src/
+portraits/*.bmp
+portraits/file-sizes.json
+portraits/cast-prompts.json
+
 .DS_Store
 node_modules/
 .env

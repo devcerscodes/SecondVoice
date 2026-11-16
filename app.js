@@ -19,6 +19,50 @@
   const hashStr = (s) => { let h = 7; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); };
   const words = (s, base = 0) => s.split(' ').map((w, i) => `<span class="w" style="animation-delay:${base + i * 70}ms">${esc(w)}</span>`).join(' ');
   const isTyping = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+  /* A language name from a file or a setting: letters only, so it can't smuggle instructions into a prompt. */
+  const langName = (v) => { const s = String(v ?? '').trim().slice(0, 30); return /^\p{L}[\p{L} ()-]{1,29}$/u.test(s) ? s : ''; };
+  /* Languages the learner can pick. The English name goes into the prompts; the language's own name
+     ("español") helps people find theirs. Names come from the browser, so nothing here needs translating.
+     Anything missing can be typed in as "Other". */
+  const LANG_CODES = ['af', 'am', 'ar', 'az', 'be', 'bg', 'bn', 'bs', 'ca', 'cs', 'cy', 'da', 'de', 'el', 'en', 'es', 'et', 'eu', 'fa', 'fi', 'fil', 'fr', 'ga', 'gl', 'gu', 'ha', 'he', 'hi', 'hr', 'hu', 'hy', 'id', 'ig', 'is', 'it', 'ja', 'jv', 'ka', 'kk', 'km', 'kn', 'ko', 'ku', 'ky', 'lo', 'lt', 'lv', 'mk', 'ml', 'mn', 'mr', 'ms', 'mt', 'my', 'ne', 'nl', 'no', 'pa', 'pl', 'ps', 'pt-BR', 'pt-PT', 'ro', 'ru', 'si', 'sk', 'sl', 'so', 'sq', 'sr', 'sv', 'sw', 'ta', 'te', 'tg', 'th', 'tk', 'tr', 'uk', 'ur', 'uz', 'vi', 'xh', 'yo', 'zh-Hans', 'zh-Hant', 'zu'];
+  const LANGS = (() => {
+    let en = null;
+    try { en = new Intl.DisplayNames(['en'], { type: 'language' }); } catch { /* old browser: fallback below */ }
+    const out = [];
+    for (const code of en ? LANG_CODES : []) {
+      const name = langName(en.of(code));
+      if (!name || name === code) continue;
+      let self = '';
+      // Only when the browser knows that language; otherwise it answers in its own UI language ("Arnavutça").
+      try { if (Intl.DisplayNames.supportedLocalesOf([code]).length) self = new Intl.DisplayNames([code], { type: 'language', fallback: 'none' }).of(code) || ''; } catch { /* no native name */ }
+      out.push({ code, name, self: self && self.toLowerCase() !== name.toLowerCase() && self !== code ? self : '' });
+    }
+    if (out.length < 20) {
+      for (const name of ['English', 'Turkish', 'Arabic', 'Chinese', 'Dutch', 'French', 'German', 'Hindi', 'Indonesian', 'Italian', 'Japanese', 'Korean', 'Persian', 'Polish', 'Portuguese', 'Russian', 'Spanish', 'Ukrainian', 'Vietnamese']) {
+        if (!out.some((l) => l.name === name)) out.push({ code: '', name, self: '' });
+      }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+  })();
+  /* The browser's language, as a guess for the first-run question. English doesn't count: they're learning it. */
+  function browserLang() {
+    for (const tag of navigator.languages?.length ? navigator.languages : [navigator.language || '']) {
+      const base = String(tag).split('-')[0].toLowerCase();
+      if (!base || base === 'en') continue;
+      const code = base === 'zh' ? (/TW|HK|MO|Hant/i.test(tag) ? 'zh-Hant' : 'zh-Hans')
+        : base === 'pt' ? (/-PT/i.test(tag) ? 'pt-PT' : 'pt-BR')
+          : base === 'nb' || base === 'nn' ? 'no' : base === 'tl' ? 'fil' : base;
+      const hit = LANGS.find((l) => l.code === code);
+      if (hit) return hit.name;
+    }
+    return '';
+  }
+  /* <option>s for a language <select>. A typed-in language that isn't on the list still shows up. */
+  function langOptions(selected, { english = true } = {}) {
+    const list = LANGS.filter((l) => english || l.name !== 'English');
+    const extra = selected && !list.some((l) => l.name === selected) ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>` : '';
+    return extra + list.map((l) => `<option value="${esc(l.name)}"${l.name === selected ? ' selected' : ''}>${esc(l.name)}${l.self ? ` · ${esc(l.self)}` : ''}</option>`).join('');
+  }
 
   const I = {
     play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
@@ -42,9 +86,15 @@
   };
 
   /* Illustrated portraits for the people you talk to */
+  const PORTRAITS = new Set(['gp', 'landlord', 'garage', 'luggage', 'restaurant', 'bank', 'barber', 'returns',
+    'party', 'meeting', 'raise', 'interview', 'witness', 'sam', 'hotel', 'transit', 'phone']);
   let avaN = 0;
   function avatar(a = {}, label = '') {
     const id = 'av' + (++avaN);
+    // Painted portraits (portraits/<key>.jpg) win; the drawn template below is the fallback.
+    if (PORTRAITS.has(a.portrait)) {
+      return `<img class="avatar avatar-img" src="portraits/${a.portrait}.jpg" alt="${esc(label)}" width="512" height="512" decoding="async" style="background:${a.bg || '#FBE5DA'}">`;
+    }
     const skin = a.skin || '#D9A47C', hc = a.hairColor || '#2B2118', shirt = a.shirt || '#E0501A', bg = a.bg || '#FBE5DA';
     const hair = {
       short: `<path d="M53 70c-2-22 12-36 27-36s30 12 27 36c-5-10-14-15-27-15s-22 5-27 15z" fill="${hc}"/>`,
@@ -90,8 +140,10 @@
 
   /* ================= State ================= */
   const LS = 'second-voice:v1';
+  const TALKS_MAX = 40; // saved role-play conversations, newest first
   const fresh = () => ({
-    v: 1, name: '', start: todayKey(), rate: 1, rateV: 2, voice: '', autoSpeak: true,
+    v: 1, name: '', start: todayKey(), rate: 1, rateV: 2, voice: '', autoSpeak: true, lang: '', native: '',
+    neural: false, nvVoice: '', handsFree: true, talks: [],
     days: {}, goals: {}, cards: {}, custom: [], scenesDone: {}, trapBest: 0,
     lexicon: [], lexUpdated: 0, quizBest: 0,
     stats: { spoken: 0, reviewed: 0, shadowed: 0, pairs: 0, traps: 0, written: 0, scenes: 0, lookups: 0, quizzed: 0 },
@@ -103,7 +155,10 @@
     for (const k of ['days', 'goals', 'cards', 'scenesDone']) if (!o[k] || typeof o[k] !== 'object' || Array.isArray(o[k])) o[k] = {};
     if (!Array.isArray(o.custom)) o.custom = [];
     if (!Array.isArray(o.lexicon)) o.lexicon = [];
+    if (!Array.isArray(o.talks)) o.talks = [];
+    o.talks = o.talks.filter((t) => t && typeof t.id === 'string' && Array.isArray(t.msgs)).slice(0, TALKS_MAX);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(o.start)) o.start = todayKey();
+    o.lang = langName(o.lang); o.native = langName(o.native);
     // The old default (0.95) sounded a touch slow; move untouched defaults to natural speed once.
     if (s && !s.rateV && +s.rate === 0.95) o.rate = 1;
     o.rateV = 2;
@@ -156,6 +211,7 @@
           else if ((S.lexUpdated || 0) > (rl.updated || 0)) { this.lexDirty = true; this.queue(); }
         } else if (S.lexicon.length) { this.lexDirty = true; this.queue(); }
         if (changed) { writeLocal(); rerender(); }
+        if (Lang.known()) Setup.close(); // answered on another device
         this.set('cloud');
       } catch (e) {
         this.ref = this.lexRef = null;
@@ -305,6 +361,93 @@
   }
 
   /* ================= Audio ================= */
+  /* Natural neural voices: Kokoro-82M in a worker (voice-worker.js). Off until the learner
+     downloads it once (about 330 MB with a GPU, 90 MB without; then cached by the browser);
+     system voices are the fallback. */
+  const CAST_VOICE = {
+    gp: 'bf_emma', landlord: 'bm_george', garage: 'am_puck', luggage: 'bf_alice', restaurant: 'am_michael',
+    bank: 'af_sarah', barber: 'af_bella', returns: 'bm_fable', party: 'bf_isabella', meeting: 'af_heart',
+    raise: 'bm_daniel', interview: 'af_kore', witness: 'bm_lewis', sam: 'af_river', hotel: 'af_nova',
+    transit: 'am_eric', phone: 'bf_lily'
+  };
+  const NV_PICKS = [['af_heart', 'Heart · American'], ['af_bella', 'Bella · American'], ['am_michael', 'Michael · American'],
+    ['bf_emma', 'Emma · British'], ['bf_isabella', 'Isabella · British'], ['bm_george', 'George · British'], ['bm_fable', 'Fable · British']];
+  const NV = {
+    w: null, state: 'off', pct: 0, seq: 0, wait: new Map(), ctx: null, src: null, token: 0, timers: [],
+    start() {
+      if (this.w || !window.Worker) return;
+      this.state = 'loading'; this.pct = 0; this.paint();
+      try { this.w = new Worker('voice-worker.js', { type: 'module' }); }
+      catch { this.fail(); return; }
+      this.w.onmessage = (e) => {
+        const m = e.data || {};
+        if (m.type === 'progress' && m.total) { this.pct = Math.round((m.loaded / m.total) * 100); this.paint(); }
+        else if (m.type === 'ready') { this.state = 'ready'; this.paint(); if (S.neural !== true) { S.neural = true; save(); } }
+        else if (m.type === 'error') this.fail(m.message);
+        else if (m.type === 'note') console.warn('[voices]', m.message);
+        else if (m.type === 'audio') { const p = this.wait.get(m.id); if (!p) return; this.wait.delete(m.id); m.error ? p.rej(new Error(m.error)) : p.res(m); }
+      };
+      this.w.onerror = () => this.fail();
+      this.w.postMessage({ type: 'load', gpu: true });
+    },
+    fail(msg) {
+      try { this.w?.terminate(); } catch { /* gone */ }
+      this.w = null; this.state = 'error'; this.paint();
+      this.wait.forEach((p) => p.rej(new Error('voice engine stopped'))); this.wait.clear();
+      if (msg) console.warn('[voices]', msg);
+    },
+    ready() { return this.state === 'ready'; },
+    gen(text, voice, speed) {
+      return new Promise((res, rej) => { const id = ++this.seq; this.wait.set(id, { res, rej }); this.w.postMessage({ type: 'speak', id, text, voice, speed }); });
+    },
+    fallbackVoice() { return S.nvVoice || (String(L.profile?.variant || '').toLowerCase().startsWith('amer') ? 'af_heart' : 'bf_emma'); },
+    halt() { this.token++; this.timers.forEach(clearTimeout); this.timers = []; try { this.src?.stop(); } catch { /* not playing */ } this.src = null; },
+    /* Speaks sentence by sentence: the next one is generated while the current one plays. */
+    play(text, o, onStart, onEnd) {
+      this.halt();
+      const my = this.token;
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.ctx.resume?.();
+      const parts = [...text.matchAll(/[^.!?…]+[.!?…]+["')\]]*\s*|[^.!?…]+$/g)].map((m) => ({ s: m[0], at: m.index })).filter((p) => p.s.trim());
+      if (!parts.length) { onEnd(); return; }
+      const voice = o.voice || this.fallbackVoice(), speed = o.rate ?? S.rate;
+      const jobs = [];
+      const job = (k) => (jobs[k] ||= this.gen(parts[k].s.trim(), voice, speed));
+      let k = 0, started = false;
+      const next = async () => {
+        if (my !== this.token) return;
+        if (k >= parts.length) { onEnd(); return; }
+        let r;
+        try { r = await job(k); } catch { if (my === this.token) { started ? onEnd() : o.fallback?.(); } return; }
+        if (my !== this.token) return;
+        if (k + 1 < parts.length) job(k + 1);
+        if (!started) { started = true; onStart(); }
+        const buf = this.ctx.createBuffer(1, r.pcm.length, r.sr);
+        buf.copyToChannel(r.pcm, 0);
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf; src.connect(this.ctx.destination); this.src = src;
+        if (o.onWord) {
+          const p = parts[k], starts = [...p.s.matchAll(/\S+/g)].map((m) => p.at + m.index);
+          const per = (buf.duration * 1000) / Math.max(1, starts.length);
+          starts.forEach((c, i) => this.timers.push(setTimeout(() => { if (my === this.token) o.onWord(c); }, i * per)));
+        }
+        src.onended = () => { if (my !== this.token) return; k++; next(); };
+        src.start();
+      };
+      next();
+    },
+    paint() {
+      $$('[data-nv]').forEach((el) => { el.innerHTML = nvStatus(); });
+    }
+  };
+  const voiceFor = (sc) => CAST_VOICE[sc?.ava?.portrait] || '';
+  function nvStatus() {
+    if (NV.state === 'ready') return `${I.check}<span>Natural voices on</span>`;
+    if (NV.state === 'loading') return `<span class="nv-spin" aria-hidden="true"></span><span>Downloading natural voices… ${NV.pct}%</span>`;
+    if (NV.state === 'error') return `${I.warn}<span>Natural voices could not load. Using system voices.</span> <button class="btn sm" data-act="nv-start">Try again</button>`;
+    return `<button class="btn sm" data-act="nv-start">${I.spark} Natural voices</button><span class="muted">One-time download, about ${navigator.gpu ? '330' : '90'} MB</span>`;
+  }
+
   const NOVELTY = /^(Albert|Bahh|Bells|Boing|Bubbles|Cellos|Deranged|Eddy|Flo|Fred|Good News|Bad News|İyi Haber|Kötü Haber|Grandma|Grandpa|Hysterical|Jester|Junior|Kathy|Organ|Pipe Organ|Org|Princess|Ralph|Reed|Rocko|Sandy|Shelley|Superstar|Trinoids|Whisper|Wobble|Zarvox)\b/i;
   const GOOD_COMPACT = /^(Samantha|Daniel|Karen|Moira|Tessa|Serena|Ava|Allison|Zoe|Evan|Tom|Susan|Nathan|Joelle|Noelle|Jamie|Kate|Oliver|Martha|Arthur|Catherine|Gordon|Fiona|Rishi|Nicky|Aaron)\b/i;
   const TTS = {
@@ -343,6 +486,13 @@
       return this.ranked()[0] || vs[0];
     },
     speak(text, o = {}) {
+      if (NV.ready() && !o.system) {
+        if (this.ok) speechSynthesis.cancel();
+        const end = () => { Wave.calm(); document.body.classList.remove('tts-on'); o.onEnd?.(); };
+        NV.play(text, { ...o, fallback: () => this.speak(text, { ...o, system: true }) },
+          () => { Wave.kick(); document.body.classList.add('tts-on'); o.onStart?.(); }, end);
+        return;
+      }
       if (!this.ok) { toast('This browser has no speech engine. Chrome or Safari will read the lines aloud.'); o.onEnd?.(); return; }
       const u = new SpeechSynthesisUtterance(text);
       const v = this.voice();
@@ -353,6 +503,7 @@
       u.onstart = () => {
         Wave.kick();
         document.body.classList.add('tts-on');
+        o.onStart?.();
         if (!o.onWord) return;
         // Some voices never fire word boundaries: estimate the timing instead.
         const starts = [...text.matchAll(/\S+/g)].map((m) => m.index);
@@ -373,7 +524,11 @@
       if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); setTimeout(() => speechSynthesis.speak(u), 80); }
       else speechSynthesis.speak(u);
     },
-    stop() { if (this.ok) speechSynthesis.cancel(); }
+    stop() {
+      NV.halt();
+      if (this.ok) speechSynthesis.cancel();
+      Wave.calm(); document.body.classList.remove('tts-on');
+    }
   };
 
   /* Plays a list of lines one after another; any other playback cancels it */
@@ -418,28 +573,42 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let micBlocked = false;
   const dictationHint = () => toast('The microphone is blocked inside this page. Use dictation instead: press Fn twice on a Mac, or tap the mic on your phone keyboard, then speak into the text box.', 8000);
+  /* patient: keep listening through short thinking pauses (learners pause mid-sentence) and
+     end the turn after SILENCE_MS of quiet once something was said. */
+  const SILENCE_MS = 1800;
   const Mic = {
-    rec: null,
-    start(btn, onText, onDone) {
+    rec: null, aborted: false,
+    start(btn, onText, onDone, o = {}) {
       if (this.rec) { this.stop(); return; }
       if (!SR || micBlocked) { dictationHint(); $('#say-input, #wr-text, #cue-notes, #nat-in')?.focus(); return; }
       const r = new SR();
-      r.lang = 'en-US'; r.interimResults = true; r.continuous = false;
-      let fin = '';
+      const variant = String(L.profile?.variant || '').toLowerCase();
+      r.lang = variant.startsWith('brit') ? 'en-GB' : 'en-US'; r.interimResults = true; r.continuous = !!o.patient;
+      let fin = '', last = '', quiet = 0, cap = 0;
+      this.aborted = false;
       r.onresult = (e) => {
         let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) fin += t; else interim += t;
+          if (e.results[i].isFinal) fin += (fin && !/\s$/.test(fin) && !/^\s/.test(t) ? ' ' : '') + t; else interim += t;
         }
-        onText?.((fin + interim).trim());
+        last = (fin + ' ' + interim).replace(/\s+/g, ' ').trim();
+        onText?.(last);
+        if (o.patient) { clearTimeout(quiet); quiet = setTimeout(() => this.stop(), SILENCE_MS); }
       };
       r.onerror = (e) => { if (['not-allowed', 'service-not-allowed', 'audio-capture', 'network'].includes(e.error)) { micBlocked = true; dictationHint(); } };
-      r.onend = () => { this.rec = null; btn?.classList.remove('live'); onAir(false); onDone?.(fin.trim()); };
-      try { r.start(); this.rec = r; btn?.classList.add('live'); onAir(true); }
-      catch { micBlocked = true; dictationHint(); }
+      r.onend = () => {
+        clearTimeout(quiet); clearTimeout(cap);
+        this.rec = null; btn?.classList.remove('live'); onAir(false);
+        if (!this.aborted) onDone?.((fin.trim() || last).trim());
+      };
+      try {
+        r.start(); this.rec = r; btn?.classList.add('live'); onAir(true);
+        if (o.patient) cap = setTimeout(() => this.stop(), 60000); // one turn is at most a minute
+      } catch { micBlocked = true; dictationHint(); }
     },
-    stop() { try { this.rec?.stop(); } catch { /* already stopped */ } }
+    stop() { try { this.rec?.stop(); } catch { /* already stopped */ } },
+    abort() { if (!this.rec) return; this.aborted = true; try { this.rec.abort(); } catch { /* already stopped */ } }
   };
   const onAir = (on) => $$('.onair').forEach((x) => x.classList.toggle('live', on));
 
@@ -465,6 +634,7 @@
       const [c, t] = map[st];
       const p = $('#ai-pill'); if (p) p.innerHTML = `<span class="dot ${c}"></span><span>${t}</span>`;
       if (changed && ['speak', 'write', 'words', 'prefs', 'lab', 'connect'].includes(current)) rerender();
+      if (changed) { Tx.status(); if (st === 'on') Tx.pump(); }
       if (changed && st === 'on' && U.speak.scen && U.speak.stage === 'chat' && !U.speak.msgs.length && !U.speak.busy) aiTurn();
       if (changed && st === 'on' && U.speak.scen?.needsBrief && !U.speak.briefBusy) makeBrief(U.speak.scen);
     },
@@ -515,7 +685,196 @@
   const aiNote = () => AI.state === 'on' ? '' : AI.state === 'off' && L.local
     ? `<div class="note">${I.info}<span><b>No AI agent found on this computer.</b> The page uses Claude Code, Codex or Gemini CLI when one is installed: install one, sign in, then restart <code>npm run dev</code>. Everything else on this page works as is.</span></div>`
     : `<div class="note">${I.info}<span><b>${AI.state === 'pending' ? 'Connecting to the AI coach…' : 'The AI coach is offline here.'}</b> It runs when this page is open on claude.ai. Everything else on this page works without it.</span></div>`;
-  const ctxLine = 'The learner is a Turkish speaker at B2 level (understands films and work English well) aiming for C1 speaking. Explanations meant for the learner are in Turkish; English examples stay in English.';
+  /* The learner's language. Preferences win, then the coach profile (learner/profile.json), then Turkish,
+     the language the course content is written in. */
+  const Lang = {
+    coach() { return langName(L.profile?.explain_in); },
+    coachNative() { return langName(L.profile?.native_language); },
+    /* Set once: in the first-run question, Preferences, or the coach's profile. */
+    known() { return !!(S.native || this.coachNative()); },
+    native() { return S.native || this.coachNative() || 'Turkish'; },
+    /* Explanations follow the native language unless the learner picked another one (often simple English). */
+    explain() { return S.lang || S.native || this.coach() || this.coachNative() || 'Turkish'; }
+  };
+
+  /* The course notes and page texts were written in Turkish. When the learner reads in another language,
+     the AI coach translates what is on screen, a batch at a time, and the translations are kept in this
+     browser, so each text is translated once. Text nodes and a few attributes only: markup and the
+     learner's own input are never touched. */
+  const SRC_LANG = 'Turkish';
+  /* Turkish letters, common Turkish words ("I've" is not "ve"), or Turkish verb endings. */
+  const TR_RE = /[çğıöşüÇĞİÖŞÜ]|(?:^|[^'’A-Za-z0-9_])(?:ve|bir|bu|ile|için|gibi|daha|sonra|ya da|dene|kez|dk|mi|mu|ne zaman|var|yok|yerine|kadar|istiyorum|lütfen|değil)\b|\B(?:abilir|ebilir|iyor|uyor|meyen|mayan)|\B(?:mak|mek)\b/i;
+  /* Short Turkish words with none of that ("eklem", "maden suyu") are found by where they sit in data.js:
+     a field whose texts are mostly Turkish (a phrase's meaning, a group's subtitle) is Turkish throughout. */
+  let trSet = null;
+  function trFields() {
+    if (trSet) return trSet;
+    const by = new Map();
+    (function walk(v, sig) {
+      if (typeof v === 'string') { const k = v.trim(); if (k) { if (!by.has(sig)) by.set(sig, []); by.get(sig).push(k); } }
+      else if (Array.isArray(v)) { const tuple = v.length <= 3 && v.every((x) => typeof x === 'string'); v.forEach((x, i) => walk(x, sig + '[' + (tuple ? i : '') + ']')); }
+      else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, sig + '.' + k);
+    })(D, '');
+    // The few page labels in this file that the pattern can't tell from English.
+    trSet = new Set(['Okuma listesi', 'haftada', 'Sitede', 'Elindekiler', 'Eksik', 'Hedef', 'Dinle', 'Kontrol et']);
+    for (const arr of by.values()) if (arr.filter((s) => TR_RE.test(s)).length / arr.length >= 0.2) arr.forEach((s) => trSet.add(s));
+    return trSet;
+  }
+  const TX_ATTRS = ['placeholder', 'title', 'aria-label'];
+  const TX_SKIP = 'script,style,textarea,code,[data-notx],[contenteditable="true"]';
+  const Tx = {
+    lang: '', map: {}, want: new Set(), held: new Map(), busy: false, pause: 0, obs: null, t: 0, saveT: 0,
+    done: new WeakMap(),
+    on() { return !!this.lang && this.lang !== SRC_LANG; },
+    isTr(s) { return s.length > 1 && s.length < 1500 && (TR_RE.test(s) || trFields().has(s)); },
+    /* A string from data.js (for example a phrase meaning saved to the Vault), in the reading language if we have it. */
+    text(s) { const k = String(s ?? '').trim(); return (this.on() && this.map[k]) || s; },
+    /* Follow the reading language. Callers re-render afterwards, which puts the source text back. */
+    sync() {
+      const l = Lang.explain();
+      if (l === this.lang) return;
+      this.lang = l; this.want.clear(); this.held.clear(); this.pause = 0; this.busy = false; // an answer for the old language is dropped
+      this.map = {};
+      if (this.on()) {
+        try { this.map = JSON.parse(localStorage.getItem('second-voice:tx:' + l) || '{}') || {}; } catch { /* storage unavailable */ }
+        if (!this.obs && window.MutationObserver) {
+          this.obs = new MutationObserver(() => { clearTimeout(this.t); this.t = setTimeout(() => this.scan(), 40); });
+        }
+        this.obs?.observe(document.body, { childList: true, subtree: true, characterData: true });
+      } else this.obs?.disconnect();
+      this.status();
+    },
+    put(holder, key, cur, set) {
+      const k = cur.trim();
+      if (!k) return;
+      const d = this.done.get(holder);
+      if (d && d[key] === cur) return; // already our translation
+      if (!this.isTr(k)) return;
+      const t = this.map[k];
+      if (t) {
+        const out = cur.match(/^\s*/)[0] + t + cur.match(/\s*$/)[0];
+        this.done.set(holder, Object.assign(d || {}, { [key]: out }));
+        set(out);
+      } else if (!((this.held.get(k) || 0) > Date.now())) this.want.add(k);
+    },
+    scan() {
+      if (!this.on()) return;
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (!n.parentElement || n.parentElement.closest(TX_SKIP) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)
+      });
+      for (let n = w.nextNode(); n; n = w.nextNode()) this.put(n, 'v', n.nodeValue, (v) => { n.nodeValue = v; });
+      for (const el of document.body.querySelectorAll('[placeholder],[title],[aria-label]')) {
+        if (el.closest(TX_SKIP) && el.tagName !== 'TEXTAREA') continue;
+        for (const a of TX_ATTRS) if (el.hasAttribute(a)) this.put(el, a, el.getAttribute(a), (v) => el.setAttribute(a, v));
+      }
+      this.obs?.takeRecords(); // our own edits aren't news
+      this.status();
+      this.pump();
+    },
+    async pump() {
+      if (this.busy || !this.want.size || !this.on() || AI.state !== 'on') { this.status(); return; }
+      const wait = this.pause - Date.now();
+      if (wait > 0) { clearTimeout(this.pumpT); this.pumpT = setTimeout(() => this.pump(), wait + 50); return; }
+      const lang = this.lang, batch = [];
+      let size = 0;
+      for (const k of this.want) { if (batch.length && (batch.length >= 40 || size + k.length > 3500)) break; batch.push(k); size += k.length; }
+      batch.forEach((k) => this.want.delete(k));
+      this.busy = true; this.status();
+      try {
+        const r = await AI.ask(`You translate the interface and course notes of an English speaking-practice app from Turkish into ${lang}. The reader is learning English.
+Rules:
+- Translate only the Turkish. Keep every English word, phrase, example sentence, title, name, number, symbol and piece of code exactly as written.
+- Keep the meaning, tone and roughly the length. Speak to the reader as "you", informally if ${lang} has an informal form.
+- Keep leading or trailing punctuation such as ":", "(", "→" or "·".
+- If an item contains no Turkish, return it unchanged.
+Answer with ONLY JSON: {"t": [one string per item, in the same order]}. There are exactly ${batch.length} items.
+Items:
+${JSON.stringify(batch)}`, 'quick');
+        if (lang !== this.lang) return;
+        const out = Array.isArray(r?.t) && r.t.length === batch.length ? r.t : null;
+        if (!out) throw Object.assign(new Error('parse'), { code: 'parse' });
+        batch.forEach((k, i) => {
+          const v = typeof out[i] === 'string' ? out[i].trim() : '';
+          if (v && v.length < k.length * 4 + 80) this.map[k] = v; else this.held.set(k, Date.now() + 10 * 60e3);
+        });
+        this.persist();
+      } catch (e) {
+        if (lang !== this.lang) return;
+        const later = Date.now() + (e?.code === 'rate_limited' ? 90e3 : 30e3);
+        batch.forEach((k) => this.held.set(k, later + 120e3)); // this batch waits a little longer
+        this.pause = later;
+        if (e?.code === 'not_granted') AI.set('off');
+      } finally {
+        if (lang === this.lang) this.busy = false;
+      }
+      this.scan();
+    },
+    persist() {
+      clearTimeout(this.saveT);
+      this.saveT = setTimeout(() => {
+        const keys = Object.keys(this.map);
+        if (keys.length > 6000) for (const k of keys.slice(0, keys.length - 6000)) delete this.map[k];
+        try { localStorage.setItem('second-voice:tx:' + this.lang, JSON.stringify(this.map)); } catch { /* storage full or unavailable */ }
+      }, 400);
+    },
+    status() {
+      let el = $('#tx-status');
+      const show = this.on() && (this.busy || this.want.size > 0);
+      if (!show) { if (el) el.hidden = true; return; }
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'tx-status'; el.className = 'tx-status'; el.setAttribute('data-notx', ''); el.setAttribute('role', 'status');
+        document.body.append(el);
+      }
+      el.hidden = false;
+      const lang = esc(this.lang);
+      el.innerHTML = AI.state === 'on'
+        ? `<span class="dot on"></span><span>Translating this page into ${lang}…</span>`
+        : AI.state === 'pending'
+          ? `<span class="dot"></span><span>Waiting for the AI coach to translate into ${lang}…</span>`
+          : `<span class="dot warn"></span><span>Some notes are still in Turkish. They switch to ${lang} once the AI coach is connected.</span> <a href="#connect">Connect</a>`;
+    }
+  };
+
+  /* First run: ask the learner's native language before anything else, so every explanation starts in it. */
+  const Setup = {
+    open() {
+      if ($('#setup') || Lang.known()) return;
+      const guess = browserLang();
+      const el = document.createElement('div');
+      el.id = 'setup'; el.className = 'setup'; el.setAttribute('data-notx', '');
+      el.innerHTML = `<form class="setup-card" role="dialog" aria-modal="true" aria-labelledby="setup-h">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <h2 id="setup-h">Welcome to Second Voice</h2>
+          <p class="muted">You practise in English. Tips, corrections and translations come in your own language.</p>
+          <div class="field"><label for="su-native">What is your native language?</label>
+            <select class="input" id="su-native" required><option value=""${guess ? '' : ' selected'} disabled>Choose your language</option>${langOptions(guess, { english: false })}<option value="__other">Other…</option></select></div>
+          <div class="field" id="su-other-f" hidden><label for="su-other">Your language, in English</label><input class="input" id="su-other" maxlength="30" autocomplete="off" placeholder="e.g. Swahili"></div>
+          <div class="field"><label for="su-explain">Explanations in</label>
+            <select class="input" id="su-explain"><option value="">My native language</option><option value="English">Simple English</option></select></div>
+          <p class="muted setup-small">You can change both in Preferences at any time.</p>
+          <button class="btn primary" type="submit">Continue</button>
+        </form>`;
+      document.body.append(el);
+      const sel = $('#su-native', el), other = $('#su-other', el), otherF = $('#su-other-f', el);
+      sel.addEventListener('change', () => { otherF.hidden = sel.value !== '__other'; if (!otherF.hidden) other.focus(); });
+      $('form', el).addEventListener('submit', (e) => {
+        e.preventDefault();
+        const name = sel.value === '__other' ? langName(other.value) : langName(sel.value);
+        if (!name) { toast(sel.value === '__other' ? 'Type the language name in English, letters only.' : 'Choose your native language.'); (sel.value === '__other' ? other : sel).focus(); return; }
+        S.native = name;
+        S.lang = $('#su-explain', el).value === 'English' ? 'English' : '';
+        U.lab.recent = [];
+        save();
+        this.close();
+        rerender();
+        toast(`Explanations will be in ${Lang.explain()}. You can change this in Preferences.`, 4500);
+      });
+      setTimeout(() => sel.focus(), 50);
+    },
+    close() { $('#setup')?.remove(); }
+  };
+  const ctx = () => `The learner is a ${Lang.native()} speaker at B2 level (understands films and work English well) aiming for C1 speaking. Explanations meant for the learner are in ${Lang.explain()}; English examples stay in English.`;
 
   /* ================= Feedback effects ================= */
   function toast(msg, ms = 3400) {
@@ -622,7 +981,7 @@
   let current = null;
   const R = {};
   const U = {
-    speak: { tab: 'roles', scen: null, stage: 'brief', msgs: [], busy: false, hints: [], summary: null, err: '', briefBusy: false },
+    speak: { tab: 'roles', scen: null, stage: 'brief', msgs: [], busy: false, hints: [], summary: null, err: '', briefBusy: false, phase: 'idle', turn: 0 },
     lab: { tab: 'look', q: '', busy: false, entry: null, err: '', recent: [], filter: '', pos: 'all', quiz: null, scr: 0 },
     pb: { sel: 'doctor', q: '' },
     plan: { area: 'speak' },
@@ -640,7 +999,7 @@
     go(VIEWS.includes(h) ? h : 'today');
   }
   function go(v) {
-    queueId++; TTS.stop(); Mic.stop();
+    queueId++; U.speak.turn++; TTS.stop(); Mic.abort(); U.speak.phase = 'idle';
     if (v !== 'speak') stopCue();
     if (v !== 'lab') { clearInterval(U.lab.scr); U.lab.scr = 0; }
     current = v;
@@ -653,8 +1012,11 @@
     R[v]();
     window.scrollTo(0, 0);
   }
-  function rerender() { if (current) R[current](); updateChrome(); }
+  function rerender() { Tx.sync(); if (current) R[current](); updateChrome(); }
+  const trapsName = () => (Lang.native() === 'Turkish' ? 'Turkish traps' : 'Common traps');
   function updateChrome() {
+    $$('.nav a[href="#traps"]').forEach((a) => { const n = a.lastChild; if (n?.nodeType === 3 && n.nodeValue !== trapsName()) n.nodeValue = trapsName(); });
+    const tv = $('#v-traps'); if (tv) tv.setAttribute('aria-label', trapsName());
     const due = dueCards().length;
     const k = todayKey(), tasks = tasksFor(k);
     const left = tasks.filter((t) => !S.days[k]?.tasks?.[t.id]).length;
@@ -868,7 +1230,7 @@
       <section class="grid g3">
         <button class="card quick" data-act="quick-scene"><span class="chip accent">Speak</span><h3>Throw me into a situation</h3><p class="muted">Hiç girmediğin bir durumda rastgele bir role-play başlat.</p><span class="arrow">Random scene →</span></button>
         <a class="card quick" href="#shadow" data-act="quick-pairs"><span class="chip listen">Sounds</span><h3>Train your ear</h3><p class="muted">θ, ð, w/v ve uzun-kısa sesler: Türk kulağının zorlandığı çiftler.</p><span class="arrow">Sound pairs →</span></a>
-        <a class="card quick" href="#traps"><span class="chip">Quiz</span><h3>Spot the Turkish trap</h3><p class="muted">"I am agree", "discuss about"... Hangisi doğru, 24 soruda gör.</p><span class="arrow">Start quiz →</span></a>
+        <a class="card quick" href="#traps"><span class="chip">Quiz</span><h3>${Lang.native() === 'Turkish' ? 'Spot the Turkish trap' : 'Spot the trap'}</h3><p class="muted">"I am agree", "discuss about"... Hangisi doğru, 24 soruda gör.</p><span class="arrow">Start quiz →</span></a>
       </section>`;
     Wave.mount($('#wave'));
   };
@@ -943,16 +1305,17 @@
     if (AI.state !== 'on') { L.entry = null; L.err = 'off'; R.lab(); return; }
     L.busy = true; L.entry = null; R.lab();
     try {
-      const r = await AI.ask(`You are a learner's dictionary for a Turkish software engineer at B2 level aiming for C1. Look up: "${q}".
-It may be a single word, a phrasal verb, an idiom or a collocation. If it is a Turkish word, choose the most natural English equivalent and look that up instead. If it is misspelled, correct it.
+      const ln = Lang.explain(), nl = Lang.native();
+      const r = await AI.ask(`You are a learner's dictionary for a ${nl} speaker at B2 level aiming for C1. Look up: "${q}".
+It may be a single word, a phrasal verb, an idiom or a collocation. If it is not English (for example a ${nl} word), choose the most natural English equivalent and look that up instead. If it is misspelled, correct it.
 Answer with ONLY a JSON object:
 {"word": "the headword in its base form", "ipa": "British IPA between slashes", "level": "CEFR level such as B2", "register": "neutral, formal, informal or slang",
- "senses": [{"pos": "noun, verb, adjective, adverb, phrasal verb, idiom...", "en": "a clear learner-dictionary definition in simple English", "tr": "short Turkish equivalent", "example": "one natural, modern example sentence that uses the headword"}],
+ "senses": [{"pos": "noun, verb, adjective, adverb, phrasal verb, idiom...", "en": "a clear learner-dictionary definition in simple English", "tr": "short ${ln} equivalent", "example": "one natural, modern example sentence that uses the headword"}],
  "family": {"noun": "", "verb": "", "adjective": "", "adverb": ""},
- "assoc_tr": "1-2 sentences in Turkish: what the word evokes, a memory hook, or how it differs from a similar word Turkish speakers confuse it with",
+ "assoc_tr": "1-2 sentences in ${ln}: what the word evokes, a memory hook, or how it differs from a similar word ${nl} speakers confuse it with",
  "collocations": ["3 to 5 common collocations"], "synonyms": ["2 to 4 synonyms"]}
 Give at most 3 senses, the most common first. In "family" give related forms from the same root, and "" where none exists.
-If the input is not a real word or phrase, answer {"error": "short explanation in Turkish"}.`);
+If the input is not a real word or phrase, answer {"error": "short explanation in ${ln}"}.`);
       if (r.error) { L.err = str(r.error, 200); }
       else {
         const e = cleanEntry(r, q); e._q = q.toLowerCase();
@@ -1069,7 +1432,7 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
       const type = pick(types);
       let q;
       if (type === 'def') q = { type, label: 'Which word matches this definition?', prompt: s.en, answer: e.word };
-      else if (type === 'tr') q = { type, label: 'Which word means this in Turkish?', prompt: s.tr, answer: e.word };
+      else if (type === 'tr') q = { type, label: 'Which word matches this translation?', prompt: s.tr, answer: e.word };
       else if (type === 'gap') {
         const re = wordRe(gapForm);
         const surface = s.example.match(re)[0];
@@ -1339,7 +1702,8 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
     if (AI.state !== 'on') return;
     U.speak.briefBusy = true; R.speak();
     try {
-      const r = await AI.ask(`${ctxLine}\nThe learner wants to practise this situation in a speaking role-play: "${sc.setup}".\nDesign the scene. Answer with ONLY JSON:\n{"title": "short English title", "where": "place", "name": "the partner's first name or title and name", "job": "the partner's role in a few English words", "role_en": "one English sentence describing the partner's personality and attitude", "learner_en": "who the learner plays, in English", "setup_en": "2 English sentences describing the scene for the partner", "who": "1-2 sentences in Turkish describing the partner", "beats": ["4 short Turkish steps describing how the scene will unfold"], "you": ["3 short Turkish tasks for the learner"], "watch": "1 Turkish tip about a likely mistake or useful phrase", "phrases": [["useful English phrase", "Turkish meaning"]], "look": {"hair": "short|long|bun|curly|bald", "shirt": "#hex colour"}}\nGive exactly 6 phrases.`);
+      const ln = Lang.explain();
+      const r = await AI.ask(`${ctx()}\nThe learner wants to practise this situation in a speaking role-play: "${sc.setup}".\nDesign the scene. Answer with ONLY JSON:\n{"title": "short English title", "where": "place", "name": "the partner's first name or title and name", "job": "the partner's role in a few English words", "role_en": "one English sentence describing the partner's personality and attitude", "learner_en": "who the learner plays, in English", "setup_en": "2 English sentences describing the scene for the partner", "who": "1-2 sentences in ${ln} describing the partner", "beats": ["4 short steps in ${ln} describing how the scene will unfold"], "you": ["3 short tasks for the learner, in ${ln}"], "watch": "1 tip in ${ln} about a likely mistake or useful phrase", "phrases": [["useful English phrase", "meaning in ${ln}"]], "look": {"hair": "short|long|bun|curly|bald", "shirt": "#hex colour"}}\nGive exactly 6 phrases.`);
       if (U.speak.scen !== sc) return;
       Object.assign(sc, {
         title: str(r.title, 80) || sc.title, where: str(r.where, 60) || sc.where, name: str(r.name, 40) || sc.name, job: str(r.job, 60) || sc.job,
@@ -1362,84 +1726,157 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
   }
 
   function rolePrompt(sc) {
-    return `You are the conversation partner in an English speaking-practice app. ${ctxLine}
+    return `You are the conversation partner in an English speaking-practice app. ${ctx()}
 
 SCENE: ${sc.setup}
 YOUR CHARACTER: ${sc.name ? sc.name + ', ' + (sc.job || '') + '. ' : ''}${sc.role}
 THE LEARNER PLAYS: ${sc.learner}
-HOW THE SCENE SHOULD UNFOLD (move through these one step at a time, written in Turkish for the learner): ${(sc.beats || []).map((b, i) => `${i + 1}) ${b}`).join(' ')}
+HOW THE SCENE SHOULD UNFOLD (move through these one step at a time; they are written for the learner and may not be in English): ${(sc.beats || []).map((b, i) => `${i + 1}) ${b}`).join(' ')}
 
 How to write "reply":
-- Stay in character and talk like a real person in this place would: natural spoken English with contractions and everyday expressions.
+- Stay in character and talk like a real person in this place would: natural spoken English with contractions and everyday expressions. It will be read aloud, so write it the way people speak: no lists, no stage directions, no emojis.
+- React to what the learner actually said, including their exact details (days, amounts, names). Details the learner gives about their own situation replace the ones in the scene description above. You have not spoken to the learner before this conversation: you know only what they say here, so never claim they told you something earlier or differently. If something they said is unclear, ask about it the way this person would.
 - 1 to 3 short sentences. Now and then ask a question or add a realistic complication, so the learner has to react.
-- Never mention that this is practice, and never correct the learner inside "reply".
+- Never mention that this is practice, never correct the learner, never comment on their English.
+- The learner's lines come from speech recognition: ignore missing punctuation, odd capitals and homophones.
 
-How to write "coach" (about the learner's LATEST message only):
-- "ok": true if a fluent speaker would accept it as natural and correct.
-- "corrected": the learner's message with only the necessary grammar or word fixes.
-- "natural": how a fluent speaker would most likely say the same idea here.
-- "tip": one short tip in Turkish, at most 20 words, or "" if there is nothing to add.
-
-Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": {"ok": true, "corrected": "...", "natural": "...", "tip": "..."}}`;
+Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
   }
   function buildConversation(sc) {
-    const out = [{ role: 'user', content: rolePrompt(sc) + '\n\nStart the scene now with your first line in character. Set "coach" to null.' }];
+    const out = [{ role: 'user', content: rolePrompt(sc) + '\n\nStart the scene now with your first line in character.' }];
     for (const m of U.speak.msgs) {
-      if (m.who === 'ai') out.push({ role: 'assistant', content: JSON.stringify({ reply: m.text, coach: null }) });
+      if (m.who === 'ai') out.push({ role: 'assistant', content: JSON.stringify({ reply: m.text }) });
       else out.push({ role: 'user', content: 'Learner: ' + m.text });
     }
     return out;
   }
+  /* Corrections wait until the scene ends (fluency first). Only a coach profile with
+     correction_style "inline" asks for a note after each line, in a separate call. */
+  const inlineCoach = () => String(L.profile?.correction_style || '').toLowerCase() === 'inline';
+  async function coachLine(m, sc) {
+    try {
+      const r = await AI.ask(`${ctx()}\nSpeaking role-play. Scene: ${sc.setup}\nThe learner plays: ${sc.learner}.\nThe partner's last line: "${[...U.speak.msgs].reverse().find((x) => x.who === 'ai')?.text || ''}"\nThe learner said (speech recognition, so ignore punctuation and homophones): "${m.text}"\n\nAnswer with ONLY JSON: {"ok": true if a fluent speaker would accept it as natural and correct, "corrected": "the line with only the necessary fixes", "natural": "how a fluent speaker would most likely say it here", "tip": "one short tip in ${Lang.explain()}, at most 20 words, or empty"}`, 'quick');
+      if (U.speak.scen === sc) { m.coach = r; renderMsgs(); }
+    } catch { /* an inline note is optional */ }
+  }
   const transcript = () => U.speak.msgs.map((m) => (m.who === 'ai' ? 'Partner: ' : 'Learner: ') + m.text).join('\n');
 
+  /* Every role-play is saved as it happens (in this browser's storage, newest first), so a
+     scene that ends abruptly is still there to read back. Starts once the learner has spoken. */
+  const slimSummary = (r) => ({
+    summary_tr: str(r.summary_tr || '', 600),
+    strengths: (r.strengths || []).slice(0, 3).map((x) => str(x, 200)),
+    fixes: (r.fixes || []).slice(0, 5).map((f) => ({ you: str(f.you || '', 300), better: str(f.better || '', 300), why: str(f.why || '', 200) })),
+    phrases: (r.phrases || []).slice(0, 4).map((p) => ({ en: str(p.en || '', 160), tr: str(p.tr || '', 160) }))
+  });
+  function logTalk() {
+    const sp = U.speak, sc = sp.scen;
+    if (!sc || !sp.msgs.some((m) => m.who === 'me')) return;
+    if (!sp.talkId) sp.talkId = 't' + Date.now().toString(36);
+    let t = S.talks.find((x) => x.id === sp.talkId);
+    if (!t) {
+      t = { id: sp.talkId, at: Date.now(), scene: sc.id, title: str(sc.title, 80), name: str(sc.name || '', 40), job: str(sc.job || '', 60), ava: sc.ava || {} };
+      S.talks.unshift(t);
+    }
+    t.msgs = sp.msgs.slice(-80).map((m) => ({ who: m.who === 'ai' ? 'ai' : 'me', text: String(m.text || '').slice(0, 1200) }));
+    if (sp.summary) t.summary = slimSummary(sp.summary);
+    t.updated = Date.now();
+    if (S.talks.length > TALKS_MAX) S.talks.length = TALKS_MAX;
+    save();
+  }
+  /* Stops whatever the scene is doing (voice, mic, the hands-free loop). */
+  function hushScene() { U.speak.turn++; Mic.abort(); TTS.stop(); U.speak.phase = 'idle'; }
   function openScene(sc) {
-    TTS.stop(); queueId++;
-    Object.assign(U.speak, { tab: 'roles', scen: sc, stage: 'brief', msgs: [], hints: [], summary: null, err: '' });
+    hushScene(); queueId++;
+    Object.assign(U.speak, { tab: 'roles', scen: sc, stage: 'brief', msgs: [], hints: [], summary: null, err: '', talkId: null, log: null });
     R.speak();
     if (sc.needsBrief) makeBrief(sc);
   }
   function goLive() {
     if (U.speak.msgs.length) { U.speak.stage = 'chat'; R.speak(); return; }
-    Object.assign(U.speak, { stage: 'chat', msgs: [], hints: [], summary: null, err: '' });
+    Object.assign(U.speak, { stage: 'chat', msgs: [], hints: [], summary: null, err: '', talkId: null });
     R.speak();
     window.scrollTo(0, 0);
     if (AI.state === 'on') aiTurn();
   }
   async function aiTurn() {
     const sp = U.speak, sc = sp.scen;
-    sp.busy = true; sp.err = ''; renderMsgs();
+    sp.busy = true; sp.err = ''; setPhase('thinking'); renderMsgs();
+    let reply = '';
     try {
       const r = await AI.ask(buildConversation(sc));
       if (sp.scen !== sc) return;
-      const reply = String(r.reply || '').trim() || '...';
-      const lastMe = [...sp.msgs].reverse().find((m) => m.who === 'me');
-      if (lastMe && r.coach && typeof r.coach === 'object') lastMe.coach = r.coach;
+      reply = String(r.reply || '').trim() || '...';
       sp.msgs.push({ who: 'ai', text: reply });
-      if (S.autoSpeak) TTS.speak(reply);
+      logTalk();
     } catch (e) {
       sp.err = 'The partner did not answer.';
       aiError(e);
     } finally {
       sp.busy = false;
-      if (sp.scen === sc) renderMsgs();
+      if (sp.scen === sc) { renderMsgs(); if (!reply) setPhase('idle'); }
     }
+    if (reply && sp.scen === sc) partnerSpeaks(reply, sc);
+  }
+  /* The partner speaks in their own voice; then, hands-free, the mic opens for the learner. */
+  function partnerSpeaks(text, sc) {
+    const sp = U.speak, turn = ++sp.turn;
+    const after = () => {
+      if (turn !== sp.turn || sp.scen !== sc || sp.stage !== 'chat' || current !== 'speak') return;
+      setPhase('idle');
+      if (S.handsFree) listenTurn();
+    };
+    if (!S.autoSpeak) { after(); return; }
+    setPhase('partner');
+    TTS.speak(text, { voice: voiceFor(sc), onEnd: after });
+  }
+  function listenTurn() {
+    const sp = U.speak;
+    if (!SR || micBlocked || sp.busy || sp.stage !== 'chat' || current !== 'speak' || Mic.rec) return;
+    const ta = $('#say-input'), btn = $('#talk-btn');
+    if (!ta || !btn) return;
+    const turn = sp.turn;
+    setPhase('listening');
+    Mic.start(btn, (txt) => { ta.value = txt; }, (said) => {
+      if (turn !== sp.turn || sp.stage !== 'chat') return;
+      if (said) sendLine(); else setPhase('idle');
+    }, { patient: true });
+    if (!Mic.rec) setPhase('idle');
+  }
+  /* idle · partner (speaking) · listening · thinking */
+  function setPhase(p) {
+    const sp = U.speak; sp.phase = p;
+    const name = esc(sp.scen?.name || 'Your partner');
+    const txt = {
+      idle: SR && !micBlocked ? (S.handsFree ? 'Tap the mic and speak, or type.' : 'Tap the mic to speak, or type.') : 'Type your line, or use your keyboard\'s dictation.',
+      partner: `${name} is speaking… <span class="muted">tap the mic to cut in</span>`,
+      listening: 'Listening… <span class="muted">pause when you\'re done</span>',
+      thinking: `${name} is thinking…`
+    }[p] || '';
+    const st = $('#talk-state'); if (st) st.innerHTML = txt;
+    const c = $('.composer'); if (c) c.dataset.phase = p;
   }
   async function sendLine() {
     const ta = $('#say-input'); if (!ta) return;
     const text = ta.value.trim();
     if (!text || U.speak.busy) return;
     if (AI.state !== 'on') { aiError({ code: 'off' }); return; }
+    Mic.abort();
+    U.speak.turn++; TTS.stop();
     ta.value = '';
-    U.speak.msgs.push({ who: 'me', text });
+    const m = { who: 'me', text };
+    U.speak.msgs.push(m);
     U.speak.hints = [];
-    gain(5, 'spoken', $('#send-btn'));
+    logTalk();
+    gain(5, 'spoken', $('#talk-btn') || $('#send-btn'));
+    if (inlineCoach()) coachLine(m, U.speak.scen);
     await aiTurn();
   }
   async function getHints(btn) {
     if (U.speak.busy) return;
     btn.disabled = true;
     try {
-      const r = await AI.ask(`${ctxLine}\nScene: ${U.speak.scen.setup}\nThe learner plays: ${U.speak.scen.learner}.\nConversation so far:\n${transcript() || '(nothing yet)'}\n\nSuggest 3 different things the learner could say next, in natural spoken English at B2+ to C1 level, each under 25 words. Answer with ONLY JSON: {"options": ["...", "...", "..."]}`, 'quick');
+      const r = await AI.ask(`${ctx()}\nScene: ${U.speak.scen.setup}\nThe learner plays: ${U.speak.scen.learner}.\nConversation so far:\n${transcript() || '(nothing yet)'}\n\nSuggest 3 different things the learner could say next, in natural spoken English at B2+ to C1 level, each under 25 words. Answer with ONLY JSON: {"options": ["...", "...", "..."]}`, 'quick');
       U.speak.hints = (r.options || []).slice(0, 3).map(String);
       renderMsgs();
     } catch (e) { aiError(e); }
@@ -1447,16 +1884,35 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
   }
   async function endScene(btn) {
     if (!U.speak.msgs.some((m) => m.who === 'me')) { toast('Say at least one line before asking for feedback.'); return; }
+    hushScene(); setPhase('idle');
     btn.disabled = true; btn.textContent = 'Reviewing…';
     try {
-      const r = await AI.ask(`${ctxLine}\nThis was a speaking role-play. Scene: ${U.speak.scen.setup}\n\nTranscript:\n${transcript()}\n\nReview ONLY the learner's lines. Answer with ONLY JSON:\n{"summary_tr": "2 sentences in Turkish on how it went", "strengths": ["short, in Turkish", "..."], "fixes": [{"you": "what the learner said", "better": "more natural English"}], "phrases": [{"en": "a useful C1 phrase for this situation", "tr": "Turkish meaning"}]}\nGive at most 3 strengths, at most 4 fixes and exactly 4 phrases.`);
+      const r = await AI.ask(reviewPrompt(U.speak.scen.setup, transcript()));
       U.speak.summary = r;
+      logTalk();
       const id = U.speak.scen.id;
       if (!S.scenesDone[id]) { S.scenesDone[id] = todayKey(); }
       gain(15, 'scenes', btn);
       renderSummary();
     } catch (e) { aiError(e); }
     finally { btn.disabled = false; btn.textContent = 'End & get feedback'; }
+  }
+  function reviewPrompt(setup, tx) {
+    const ln = Lang.explain();
+    return `${ctx()}\nThis was a speaking role-play. Scene: ${setup}\nThe learner's lines came from speech recognition: never count missing punctuation, capitals or homophones as mistakes. Pronunciation cannot be judged from text.\n\nTranscript:\n${tx}\n\nReview ONLY the learner's lines. Pick the corrections with the highest impact: first what hurts understanding, then what sounds clearly unnatural or impolite for this situation; a pattern that repeats beats a one-off slip. Skip anything that is already fine. Answer with ONLY JSON:\n{"summary_tr": "2 sentences in ${ln} on how it went", "strengths": ["short, in ${ln}", "..."], "fixes": [{"you": "what the learner said, quoted exactly", "better": "how a fluent speaker would naturally say it here, one sentence the learner can say aloud", "why": "one short line in ${ln}"}], "phrases": [{"en": "a useful C1 phrase for this situation", "tr": "meaning in ${ln}"}]}\nGive at most 3 strengths, at most 5 fixes (ordered by impact) and exactly 4 phrases.`;
+  }
+  /* Feedback for a saved conversation that ended before "End & get feedback". */
+  async function reviewTalk(t) {
+    if (U.speak.reviewBusy) return;
+    U.speak.reviewBusy = t.id; R.speak();
+    try {
+      const setup = D.scenarios.find((s) => s.id === t.scene)?.setup || t.title;
+      const tx = t.msgs.map((m) => (m.who === 'ai' ? 'Partner: ' : 'Learner: ') + m.text).join('\n');
+      const r = await AI.ask(reviewPrompt(setup, tx));
+      t.summary = slimSummary(r);
+      save();
+    } catch (e) { aiError(e); }
+    finally { U.speak.reviewBusy = null; if (current === 'speak') R.speak(); }
   }
 
   function coachHTML(c, said) {
@@ -1490,6 +1946,9 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     const hints = $('#hints');
     if (hints) hints.innerHTML = sp.hints.map((h) => `<button data-act="use-hint" data-text="${esc(h)}">${esc(h)}</button>`).join('');
   }
+  const tryHTML = (t) => `<span class="chip ${t.score >= 80 ? 'good' : ''}">${t.score >= 80 ? 'Got it' : 'Again'} · ${t.score}%</span>
+    <span class="diff">${t.words.map((w, i) => `<span class="${t.hit[i] ? 'ok' : 'miss'}">${esc(w)}</span>`).join(' ')}</span>
+    <span class="muted">We heard: “${esc(t.heard)}”</span>`;
   function renderSummary() {
     const box = $('#summary'); const r = U.speak.summary;
     if (!box) return;
@@ -1499,7 +1958,8 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
         <div class="section-title"><h2>How it went</h2><span class="chip good">+15 XP</span></div>
         <p>${esc(r.summary_tr)}</p>
         ${(r.strengths || []).length ? `<div><b>İyi yaptıkların</b><ul style="margin:6px 0 0;padding-left:20px" class="muted">${r.strengths.map((s) => `<li>${esc(s)}</li>`).join('')}</ul></div>` : ''}
-        ${(r.fixes || []).map((f) => `<div class="issue"><span class="o">${esc(f.you)}</span><span class="f">${esc(f.better)}</span><div class="why row">${sayBtn(f.better, 'Hear')}${vaultBtn(f.better, 'Senin cümlen: ' + f.you)}</div></div>`).join('')}
+        ${(r.fixes || []).length ? `<div class="stack" style="gap:6px"><b>Say it again</b><span class="muted" style="font-size:14px">Hear the natural version, then say it out loud. The mic checks the words; for pronunciation use the Shadow page.</span></div>` : ''}
+        ${(r.fixes || []).map((f, i) => `<div class="issue"><span class="o">${esc(f.you)}</span><span class="f">${esc(f.better)}</span>${f.why ? `<span class="tr">${esc(f.why)}</span>` : ''}<div class="why row">${sayBtn(f.better, 'Hear')}<button class="btn sm mic" data-act="fix-say" data-i="${i}">${I.mic} Say it</button>${vaultBtn(f.better, 'Senin cümlen: ' + f.you)}</div><div class="fix-try" id="fix-try-${i}" aria-live="polite">${f.try ? tryHTML(f.try) : ''}</div></div>`).join('')}
         ${(r.phrases || []).length ? `<div><b>Steal these phrases</b>${r.phrases.map((p) => `<div class="phrase">${sayBtn(p.en, '', '', 'btn ghost icon-btn sm')}<div><div class="en">${esc(p.en)}</div><div class="tr">${esc(p.tr)}</div></div><button class="btn ghost icon-btn sm" data-act="vault-add" data-en="${esc(p.en)}" data-tr="${esc(p.tr)}" aria-label="Add to Vault">${I.plus}</button></div>`).join('')}</div>` : ''}
       </div>`;
   }
@@ -1528,7 +1988,8 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     U.cue.notes = text; U.cue.busy = true; btn.disabled = true; btn.textContent = 'Evaluating…';
     const card = D.cueCards[U.cue.i];
     try {
-      U.cue.res = await AI.ask(`${ctxLine}\nThe learner just spoke for 2 minutes on this IELTS Speaking Part 2 cue card: "${card.t}" (${card.b.join('; ')}). This is their transcript, dictated or written from memory:\n"""${text}"""\n\nJudge it like an IELTS examiner on fluency and coherence, lexical resource and grammatical range (pronunciation cannot be judged from text). Answer with ONLY JSON:\n{"band": "estimated band like 6.5", "fluency": "1-2 sentences in Turkish", "vocab": "1-2 sentences in Turkish", "grammar": "1-2 sentences in Turkish", "upgrade": "the learner's main idea rewritten as a natural C1 answer, 4-6 sentences", "phrases": [{"en": "...", "tr": "..."}]}\nGive exactly 4 phrases.`);
+      const ln = Lang.explain();
+      U.cue.res = await AI.ask(`${ctx()}\nThe learner just spoke for 2 minutes on this IELTS Speaking Part 2 cue card: "${card.t}" (${card.b.join('; ')}). This is their transcript, dictated or written from memory:\n"""${text}"""\n\nJudge it like an IELTS examiner on fluency and coherence, lexical resource and grammatical range (pronunciation cannot be judged from text). Answer with ONLY JSON:\n{"band": "estimated band like 6.5", "fluency": "1-2 sentences in ${ln}", "vocab": "1-2 sentences in ${ln}", "grammar": "1-2 sentences in ${ln}", "upgrade": "the learner's main idea rewritten as a natural C1 answer, 4-6 sentences", "phrases": [{"en": "...", "tr": "meaning in ${ln}"}]}\nGive exactly 4 phrases.`);
       gain(5, 'written', btn);
     } catch (e) { aiError(e); }
     finally { U.cue.busy = false; R.speak(); }
@@ -1581,7 +2042,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (!q) return pbSituation(D.phrasebook.find((s) => s.id === pb.sel) || D.phrasebook[0]);
     const out = [];
     D.phrasebook.forEach((s) => s.groups.forEach((g, gi) => {
-      const rows = g.p.map((p, i) => [p, i]).filter(([p]) => lc(p.join(' ')).includes(q));
+      const rows = g.p.map((p, i) => [p, i]).filter(([p]) => lc(p.join(' ') + (Tx.on() ? ' ' + p.map((x) => Tx.text(x)).join(' ') : '')).includes(q));
       if (rows.length) out.push(`<section class="pb-group"><div class="pb-gh"><div><h3>${esc(s.title)}</h3><span class="tr">${esc(g.t)} · ${esc(g.tr)}</span></div></div><div class="pb-list">${rows.map(([p, i], n) => pbRow(p, n, `${s.id}-${gi}-${i}`)).join('')}</div></section>`);
     }));
     return out.length ? `<div class="pb-main">${out.join('')}</div>` : `<section class="card empty"><h3>No phrases found</h3><p>Başka bir kelime dene: ağrı, bill, taxi, room...</p></section>`;
@@ -1591,7 +2052,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     $$('[data-act="pb-sel"]').forEach((x) => x.setAttribute('aria-pressed', !U.pb.q.trim() && x.dataset.id === U.pb.sel));
   }
   const phrasebookHTML = () => `
-    <div class="pb-search"><span class="lookup-ico" aria-hidden="true">${I.book}</span><input id="pb-search" autocomplete="off" placeholder="Search every phrase, in English or Turkish: ağrı, bill, taxi…" value="${esc(U.pb.q)}" aria-label="Search phrases"></div>
+    <div class="pb-search"><span class="lookup-ico" aria-hidden="true">${I.book}</span><input id="pb-search" autocomplete="off" placeholder="${Tx.on() ? `Search every phrase, in English or ${esc(Lang.explain())}` : 'Search every phrase, in English or Turkish: ağrı, bill, taxi…'}" value="${esc(U.pb.q)}" aria-label="Search phrases"></div>
     <div class="pb-strip">${D.phrasebook.map((s, i) => `
       <button class="pb-sit" style="--i:${i}" aria-pressed="${!U.pb.q.trim() && s.id === U.pb.sel}" data-act="pb-sel" data-id="${s.id}">
         <span class="pb-ava">${avatar(pbAva(s), '')}</span>
@@ -1650,10 +2111,19 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
       return;
     }
 
+    if (!sp.scen && sp.log) {
+      const t = S.talks.find((x) => x.id === sp.log);
+      if (t) { view('speak').innerHTML = convoView(t); return; }
+      sp.log = null;
+    }
     if (!sp.scen) {
       const thisWeek = D.weeks[weekNow() - 1].speak.map(sceneFromLabel).filter(Boolean);
+      const shown = sp.allTalks ? S.talks : S.talks.slice(0, 4);
       view('speak').innerHTML = head + `
         ${aiNote()}
+        ${S.talks.length ? `<section class="stack"><div class="section-title"><h2>Your recent conversations</h2><span class="mono">${S.talks.length} saved</span></div>
+          <div class="convo-list">${shown.map(convoCard).join('')}</div>
+          ${S.talks.length > 4 ? `<div class="row"><button class="btn sm ghost" data-act="talks-all">${sp.allTalks ? 'Show fewer' : `Show all ${S.talks.length}`}</button></div>` : ''}</section>` : ''}
         ${thisWeek.length ? `<section class="stack"><div class="section-title"><h2>This week's scenes</h2><span class="mono">Week ${weekNow()}</span></div>
           <div class="scen-grid">${thisWeek.map(scenCard).join('')}</div></section>` : ''}
         <section class="stack"><div class="section-title"><h2>Unfamiliar situations</h2><span class="mono">${D.scenarios.length} scenes</span></div>
@@ -1702,8 +2172,9 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
             <div class="row golive-row">
               <button class="btn primary golive" data-act="go-live" ${busy ? 'disabled' : ''}><span class="light"></span>Go on air</button>
               ${D.phrasebook.some((p) => p.scene === sc.id) ? `<button class="btn" data-act="pb-open" data-id="${D.phrasebook.find((p) => p.scene === sc.id).id}">${I.book} Full phrasebook</button>` : ''}
-              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.` : `AI partner ${L.local ? 'bilgisayarındaki agent ile' : 'claude.ai üzerinde'} çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.`}</span>
+              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.${SR && S.handsFree ? ' Sonra mikrofon kendiliğinden açılır: konuş, bitince kısa bir sus.' : ''}` : `AI partner ${L.local ? 'bilgisayarındaki agent ile' : 'claude.ai üzerinde'} çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.`}</span>
             </div>
+            ${NV.ready() ? '' : `<div class="nv-line" data-nv>${nvStatus()}</div>`}
           </div>
         </section>`;
       return;
@@ -1727,27 +2198,85 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
         <div class="stack">
           <section class="card chat" aria-label="Conversation">
             <div class="chat-head"><span class="mini-ava live">${avatar(sc.ava, sc.name || 'Partner')}</span><div style="min-width:0"><b style="font-size:15px;display:block">${esc(sc.name || 'Partner')}</b><span class="muted" style="font-size:13px">${esc(sc.job || '')}</span></div><span class="onair">On air</span><span class="spacer"></span>
-              <label class="row muted" style="gap:6px;font-size:13px"><input type="checkbox" id="auto-speak" data-act="auto-speak"${S.autoSpeak ? ' checked' : ''}> Read replies aloud</label></div>
+              <div class="chat-opts">
+                <label class="row muted"><input type="checkbox" id="auto-speak" data-act="auto-speak"${S.autoSpeak ? ' checked' : ''}> Read replies aloud</label>
+                ${SR ? `<label class="row muted"><input type="checkbox" id="hands-free" data-act="hands-free"${S.handsFree ? ' checked' : ''}> Hands-free</label>` : ''}
+              </div></div>
             <div class="msgs" id="msgs" aria-live="polite"></div>
             <div class="hints" id="hints"></div>
-            <form class="composer" data-form="say">
-              <button class="btn icon-btn mic" type="button" data-act="mic-into" data-target="#say-input" data-send="1" aria-label="Speak">${I.mic}</button>
-              <textarea class="input" id="say-input" rows="1" placeholder="Speak or type your line, then press Enter"></textarea>
-              <button class="btn primary icon-btn" id="send-btn" type="submit" aria-label="Send">${I.send}</button>
+            <form class="composer" data-form="say" data-phase="${esc(sp.phase || 'idle')}">
+              <div class="talk-row">
+                <button class="talk mic" id="talk-btn" type="button" data-act="talk" aria-label="Talk">${I.mic}</button>
+                <div class="talk-state" id="talk-state" aria-live="polite"></div>
+              </div>
+              <div class="type-row">
+                <textarea class="input" id="say-input" rows="1" placeholder="Your words appear here as you speak. You can also type and press Enter."></textarea>
+                <button class="btn primary icon-btn" id="send-btn" type="submit" aria-label="Send">${I.send}</button>
+              </div>
             </form>
           </section>
+          ${NV.ready() ? '' : `<div class="nv-line" data-nv>${nvStatus()}</div>`}
           <div class="row">
             <button class="btn" data-act="hints" ${AI.state === 'on' ? '' : 'disabled'}>${I.spark} What could I say?</button>
             <button class="btn" data-act="restart-scene">Restart</button>
             <span class="spacer"></span>
             <button class="btn dark" data-act="end-scene" ${AI.state === 'on' ? '' : 'disabled'}>End &amp; get feedback</button>
           </div>
+          <p class="muted" style="font-size:13.5px;margin:-4px 0 0">${inlineCoach() ? 'Your coach profile asks for a note after each line.' : 'No corrections while you talk. They come after the scene, when you press End &amp; get feedback.'}</p>
           <div id="summary"></div>
         </div>
       </div>`;
     renderMsgs();
     renderSummary();
+    setPhase(sp.busy ? 'thinking' : sp.phase || 'idle');
   };
+  /* Saved conversations: a card in the list, and a read-back view with the feedback. */
+  const whenTalk = (ms) => new Date(ms).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const convoStats = (t) => {
+    const mine = t.msgs.filter((m) => m.who === 'me');
+    return { lines: mine.length, words: mine.reduce((a, m) => a + m.text.split(/\s+/).filter(Boolean).length, 0) };
+  };
+  const convoCard = (t) => {
+    const s = convoStats(t);
+    return `<button class="convo" data-act="talk-open" data-id="${esc(t.id)}">
+      <span class="mini-ava">${avatar(t.ava, '')}</span>
+      <span class="convo-main"><b>${esc(t.title)}</b><span class="muted">${t.name ? `with ${esc(t.name)} · ` : ''}${esc(whenTalk(t.at))}</span></span>
+      <span class="convo-meta"><span class="mono">${s.lines} ${s.lines === 1 ? 'line' : 'lines'} · ${s.words} words</span>${t.summary ? '<span class="chip good">Feedback</span>' : '<span class="chip">No feedback</span>'}</span>
+    </button>`;
+  };
+  function convoSummary(r) {
+    return `<div class="card raised stack">
+      <div class="section-title"><h2>Feedback</h2></div>
+      ${r.summary_tr ? `<p>${esc(r.summary_tr)}</p>` : ''}
+      ${(r.strengths || []).length ? `<div><b>İyi yaptıkların</b><ul style="margin:6px 0 0;padding-left:20px" class="muted">${r.strengths.map((s) => `<li>${esc(s)}</li>`).join('')}</ul></div>` : ''}
+      ${(r.fixes || []).map((f) => `<div class="issue"><span class="o">${esc(f.you)}</span><span class="f">${esc(f.better)}</span>${f.why ? `<span class="tr">${esc(f.why)}</span>` : ''}<div class="why row">${sayBtn(f.better, 'Hear')}${vaultBtn(f.better, 'Senin cümlen: ' + f.you)}</div></div>`).join('')}
+      ${(r.phrases || []).length ? `<div><b>Steal these phrases</b>${r.phrases.map((p) => `<div class="phrase">${sayBtn(p.en, '', '', 'btn ghost icon-btn sm')}<div><div class="en">${esc(p.en)}</div><div class="tr">${esc(p.tr)}</div></div><button class="btn ghost icon-btn sm" data-act="vault-add" data-en="${esc(p.en)}" data-tr="${esc(p.tr)}" aria-label="Add to Vault">${I.plus}</button></div>`).join('')}</div>` : ''}
+    </div>`;
+  }
+  function convoView(t) {
+    const s = convoStats(t), v = CAST_VOICE[t.ava?.portrait] || '';
+    const busy = U.speak.reviewBusy === t.id;
+    return `
+      <div class="row"><button class="btn ghost" data-act="talk-close">${I.back} All scenes</button><span class="spacer"></span><button class="btn ghost" data-act="talk-del" data-id="${esc(t.id)}">${I.trash} Delete</button></div>
+      <header class="page-head" style="gap:6px">
+        <div class="eyebrow"><span>Saved conversation</span><span>·</span><b>${esc(whenTalk(t.at))}</b></div>
+        <h1 style="font-size:clamp(28px,4vw,44px)">${esc(t.title)}</h1>
+        <p class="lead">${s.lines} ${s.lines === 1 ? 'line' : 'lines'} from you · ${s.words} words</p>
+      </header>
+      <div class="convo-view">
+        <section class="card chat" aria-label="Saved conversation">
+          <div class="chat-head"><span class="mini-ava">${avatar(t.ava, t.name || 'Partner')}</span><div style="min-width:0"><b style="font-size:15px;display:block">${esc(t.name || 'Partner')}</b><span class="muted" style="font-size:13px">${esc(t.job || '')}</span></div></div>
+          <div class="msgs convo-msgs">${t.msgs.map((m) => m.who === 'ai'
+            ? `<div class="msg ai"><span class="who">${esc(t.name || 'Partner')} ${sayBtn(m.text, '', v ? `data-voice="${v}"` : '', 'btn ghost icon-btn sm')}</span><div class="bubble">${esc(m.text)}</div></div>`
+            : `<div class="msg me"><span class="who">You · as the mic heard it</span><div class="bubble">${esc(m.text)}</div></div>`).join('')}</div>
+        </section>
+        <div class="stack">
+          ${t.summary ? convoSummary(t.summary) : `<div class="note">${I.info}<span><b>Bu konuşmanın geri bildirimi yok.</b> Sahne "End &amp; get feedback"e basılmadan bitmiş. Kayıttaki metinden şimdi alabilirsin.</span></div>
+            <div class="row"><button class="btn primary" data-act="talk-review" data-id="${esc(t.id)}" ${AI.state === 'on' && !busy ? '' : 'disabled'}>${busy ? 'Reviewing…' : I.spark + ' Get feedback now'}</button></div>`}
+          <p class="muted" style="font-size:13.5px">Kayıtlar sadece bu tarayıcıda durur (en fazla ${TALKS_MAX} konuşma). Ses kaydedilmez; "You" satırları mikrofonun yazıya döktüğü hâlidir.</p>
+        </div>
+      </div>`;
+  }
   const scenCard = (s, i = 0) => `
     <button class="scen${S.scenesDone[s.id] ? ' done-mark' : ''}" data-act="scene" data-id="${esc(s.id)}" style="--i:${i}">
       <span class="ava">${avatar(s.ava, s.name || '')}</span>
@@ -1856,7 +2385,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
         <h3>Add a phrase you noticed</h3>
         <p class="muted">Dizide, podcast'te ya da işte duyduğun ve "ben böyle demezdim" dediğin her ifadeyi buraya ekle. Tek kelime değil, kalıp olarak.</p>
         <div class="field"><label for="n-en">English phrase</label><div class="row"><input class="input" id="n-en" placeholder="e.g. it's a long shot" style="flex:1;min-width:200px" required><button class="btn" type="button" data-act="ai-fill" ${AI.state === 'on' ? '' : 'disabled'}>${I.spark} Fill the rest</button></div></div>
-        <div class="field"><label for="n-tr">Meaning (Turkish)</label><input class="input" id="n-tr" placeholder="zayıf bir ihtimal"></div>
+        <div class="field"><label for="n-tr">Meaning (${esc(Lang.explain())})</label><input class="input" id="n-tr" placeholder="zayıf bir ihtimal"></div>
         <div class="field"><label for="n-ex">Example sentence</label><input class="input" id="n-ex" placeholder="It's a long shot, but it might work."></div>
         <div class="field"><label for="n-tag">Type</label><select class="input" id="n-tag">${Object.entries(tagNames).filter(([k]) => k !== 'all').map(([k, n]) => `<option value="${k}"${k === 'mine' ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
         <div class="row"><button class="btn primary" type="submit">${I.plus} Add to Vault</button></div>
@@ -1966,7 +2495,8 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (text.split(/\s+/).length < 30) { toast('Write at least 30 words so the coach has something to work with.'); return; }
     wr.busy = true; btn.disabled = true; btn.textContent = 'Reading…';
     try {
-      wr.res = await AI.ask(`${ctxLine}\nWriting prompt: "${wr.prompt}"\nLearner's text:\n"""${text}"""\n\nAnswer with ONLY JSON:\n{"level": "CEFR estimate like B2 or B2+", "summary_tr": "2 sentences in Turkish: main strength and main thing to improve", "issues": [{"original": "exact phrase from the text", "fix": "corrected or more natural version", "why_tr": "short reason in Turkish"}], "rewrite": "the whole text rewritten at natural C1 level, same ideas, similar length", "phrases": [{"en": "...", "tr": "..."}]}\nList at most 6 issues, most important first, and exactly 4 phrases from the rewrite.`);
+      const ln = Lang.explain();
+      wr.res = await AI.ask(`${ctx()}\nWriting prompt: "${wr.prompt}"\nLearner's text:\n"""${text}"""\n\nAnswer with ONLY JSON:\n{"level": "CEFR estimate like B2 or B2+", "summary_tr": "2 sentences in ${ln}: main strength and main thing to improve", "issues": [{"original": "exact phrase from the text", "fix": "corrected or more natural version", "why_tr": "short reason in ${ln}"}], "rewrite": "the whole text rewritten at natural C1 level, same ideas, similar length", "phrases": [{"en": "...", "tr": "meaning in ${ln}"}]}\nList at most 6 issues, most important first, and exactly 4 phrases from the rewrite.`);
       gain(15, 'written', btn);
     } catch (e) { aiError(e); }
     finally { wr.busy = false; R.write(); }
@@ -1977,7 +2507,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (!wr.nat) { toast('Type a sentence first.'); return; }
     wr.natBusy = true; R.write();
     try {
-      wr.natRes = await AI.ask(`${ctxLine}\nThe learner wants to express this (it may be Turkish or imperfect English):\n"""${wr.nat}"""\n\nGive the most natural way a fluent speaker would say it in three registers. Answer with ONLY JSON:\n{"casual": "to a friend", "neutral": "at work, spoken", "formal": "in a formal email", "note_tr": "1-2 sentences in Turkish about a key word choice or common mistake"}`, 'quick');
+      wr.natRes = await AI.ask(`${ctx()}\nThe learner wants to express this (it may be ${Lang.native()} or imperfect English):\n"""${wr.nat}"""\n\nGive the most natural way a fluent speaker would say it in three registers. Answer with ONLY JSON:\n{"casual": "to a friend", "neutral": "at work, spoken", "formal": "in a formal email", "note_tr": "1-2 sentences in ${Lang.explain()} about a key word choice or common mistake"}`, 'quick');
       gain(3, null, $('#nat-in'));
     } catch (e) { aiError(e); }
     finally { wr.natBusy = false; R.write(); }
@@ -2003,9 +2533,10 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     }
     view('traps').innerHTML = `
       <header class="page-head">
-        <div class="eyebrow"><span>Turkish traps</span><span>·</span><b>Best ${S.trapBest}/${D.traps.length}</b></div>
-        <h1 class="h-rise">${words('The mistakes')} <span class="sub">${words('your Turkish makes for you.', 140)}</span></h1>
+        <div class="eyebrow"><span>${trapsName()}</span><span>·</span><b>Best ${S.trapBest}/${D.traps.length}</b></div>
+        <h1 class="h-rise">${words('The mistakes')} <span class="sub">${words(Lang.native() === 'Turkish' ? 'your Turkish makes for you.' : 'your first language makes for you.', 140)}</span></h1>
         <p class="lead">Bunlar bilgi eksikliği değil, Türkçenin İngilizceye sızması. Anladığında fark etmezsin, konuşurken ağzından çıkar. Hızlı karar ver: konuşurken düşünmeye vaktin olmayacak.</p>
+        ${Lang.native() === 'Turkish' ? '' : `<div class="note">${I.info}<span>These traps were collected from Turkish speakers. Many catch ${esc(Lang.native())} speakers too. For the ones typical of ${esc(Lang.native())}, ask your coach: role-play and writing feedback already look for them.</span></div>`}
       </header>
       ${quiz}
       <details class="card"><summary style="cursor:pointer;font-weight:650">All ${D.traps.length} traps at a glance</summary>
@@ -2062,6 +2593,21 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     hint.hidden = !hint.innerHTML;
   }
   R.prefs = () => {
+    const nat = Lang.native(), sameAs = S.native ? nat : (Lang.coach() || Lang.coachNative() || 'Turkish');
+    const langCard = `
+        <div class="card stack" data-notx>
+          <h3>Your language</h3>
+          <div class="field"><label for="p-native">Native language</label><select class="input" id="p-native" data-pref="native">
+            ${S.native ? '' : `<option value="" selected>${Lang.coachNative() ? `From your coach profile (${esc(Lang.coachNative())})` : 'Not set (Turkish)'}</option>`}
+            ${langOptions(S.native, { english: false })}<option value="__other">Other…</option>
+          </select></div>
+          <div class="field" id="p-native-other" hidden><label for="p-native-o">Your language, in English</label><input class="input" id="p-native-o" maxlength="30" autocomplete="off" placeholder="e.g. Swahili" data-pref="nativeOther"></div>
+          <div class="field"><label for="p-lang">Explanations &amp; translations in</label><select class="input" id="p-lang" data-pref="lang">
+            <option value=""${S.lang ? '' : ' selected'}>${S.native ? 'My native language' : Lang.coach() ? 'From your coach profile' : 'Same as native'} (${esc(sameAs)})</option>
+            ${langOptions(S.lang)}
+          </select></div>
+          <p class="muted" style="font-size:14px">The AI coach writes every tip, correction and meaning in ${esc(Lang.explain())}. The course notes were written in Turkish${Tx.on() ? `, so the AI coach translates them into ${esc(Lang.explain())} as you open each page and keeps the translations in this browser` : ''}.${L.local ? ' Your agent coach reads <code>native_language</code> and <code>explain_in</code> in <code>learner/profile.json</code>; tell it if you want those changed too.' : ''}</p>
+        </div>`;
     view('prefs').innerHTML = `
       <header class="page-head">
         <div class="eyebrow"><span>Preferences</span></div>
@@ -2074,9 +2620,18 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
           <div class="field"><label for="p-start">Plan start date</label><input class="input" type="date" id="p-start" value="${esc(S.start)}" data-pref="start"></div>
           <p class="muted" style="font-size:14px">Hafta numaran bu tarihten hesaplanır. Şu an: Week ${weekNow()}.</p>
         </div>
+        ${langCard}
         <div class="card stack">
           <h3>Voice</h3>
-          <div class="field"><label for="p-voice">English voice</label><select class="input" id="p-voice" data-pref="voice"></select></div>
+          <div class="stack" style="gap:8px">
+            <div class="nv-line" data-nv>${nvStatus()}</div>
+            <p class="muted" style="font-size:14px">Natural voices run on your computer, in the browser. The model downloads once from Hugging Face and stays cached; what you hear is generated here and never sent anywhere. Each role-play character gets their own voice.</p>
+            <div class="field"><label for="p-nv">Natural voice for phrases and drills</label><select class="input" id="p-nv" data-pref="nvVoice">
+              <option value=""${S.nvVoice ? '' : ' selected'}>Automatic (${L.profile?.variant && String(L.profile.variant).toLowerCase().startsWith('amer') ? 'Heart · American' : 'Emma · British'})</option>
+              ${NV_PICKS.map(([id, n]) => `<option value="${id}"${S.nvVoice === id ? ' selected' : ''}>${n}</option>`).join('')}
+            </select></div>
+          </div>
+          <div class="field"><label for="p-voice">System voice (used when natural voices are off)</label><select class="input" id="p-voice" data-pref="voice"></select></div>
           <div class="field"><label for="p-rate">Speed: <span id="p-rate-v">${S.rate.toFixed(2)}×</span></label><input type="range" id="p-rate" min="0.6" max="1.2" step="0.05" value="${S.rate}" data-pref="rate"></div>
           <label class="goal"><input type="checkbox" id="p-auto" data-pref="autoSpeak"${S.autoSpeak ? ' checked' : ''}><span>Read role-play replies aloud</span></label>
           <div class="row"><button class="btn" data-act="say" data-text="Hi! This is how I sound. Could you understand everything I said?">${I.play} Test voice</button></div>
@@ -2246,7 +2801,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
       queueId++;
       const text = t.dataset.text; const rate = t.dataset.rate ? +t.dataset.rate : undefined;
       const k = t.dataset.kara ? $(t.dataset.kara) : null;
-      if (k) sayKaraoke(k, text, rate); else TTS.speak(text, { rate });
+      if (k) sayKaraoke(k, text, rate); else TTS.speak(text, { rate, voice: t.dataset.voice || '' });
     },
     task(t) {
       const id = t.dataset.id, d = day(), on = !d.tasks[id];
@@ -2294,13 +2849,13 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
       try { await navigator.clipboard.writeText(text); toast(`Copied “${text}”. Paste it into your AI agent.`); }
       catch { toast(`Type this into your AI agent: ${text}`, 6000); }
     },
-    'vault-add'(t) { if (addToVault(t.dataset.en, t.dataset.tr, t.dataset.ex)) burst(t, 0); },
+    'vault-add'(t) { if (addToVault(t.dataset.en, Tx.text(t.dataset.tr), t.dataset.ex)) burst(t, 0); },
     'quick-scene'() { U.speak.tab = 'roles'; const sc = pick(D.scenarios); location.hash = 'speak'; setTimeout(() => openScene(sc), 0); },
     'quick-pairs'() { U.sh.tab = 'pairs'; },
     scene(t) { const sc = D.scenarios.find((s) => s.id === t.dataset.id) || D.weeks[weekNow() - 1].speak.map(sceneFromLabel).find((s) => s && s.id === t.dataset.id); if (sc) { openScene(sc); window.scrollTo(0, 0); } },
     free(t) { openScene(freeScene(t.dataset.topic)); window.scrollTo(0, 0); },
-    'leave-scene'() { U.speak.scen = null; TTS.stop(); R.speak(); },
-    'restart-scene'() { TTS.stop(); U.speak.msgs = []; goLive(); },
+    'leave-scene'() { hushScene(); U.speak.scen = null; R.speak(); },
+    'restart-scene'() { hushScene(); U.speak.msgs = []; goLive(); },
     'go-live'() { goLive(); },
     'pb-open'(t) { Object.assign(U.speak, { tab: 'book' }); Object.assign(U.pb, { sel: t.dataset.id, q: '' }); TTS.stop(); R.speak(); window.scrollTo(0, 0); },
     'pb-sel'(t) { U.pb.sel = t.dataset.id; U.pb.q = ''; const inp = $('#pb-search'); if (inp) inp.value = ''; queueId++; TTS.stop(); renderPb(); },
@@ -2311,7 +2866,38 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
       groups.forEach(([g, gi]) => g.p.forEach((p, i) => items.push({ text: p[0], el: $(`[data-pb="${s.id}-${gi}-${i}"]`) })));
       playQueue(items);
     },
-    'show-brief'() { U.speak.stage = 'brief'; TTS.stop(); R.speak(); window.scrollTo(0, 0); },
+    'show-brief'() { hushScene(); U.speak.stage = 'brief'; R.speak(); window.scrollTo(0, 0); },
+    'nv-start'() { NV.start(); },
+    'talk-open'(t) { hushScene(); U.speak.log = t.dataset.id; R.speak(); window.scrollTo(0, 0); },
+    'talk-close'() { TTS.stop(); U.speak.log = null; R.speak(); },
+    'talk-del'(t) {
+      const i = S.talks.findIndex((x) => x.id === t.dataset.id); if (i < 0) return;
+      if (!confirm('Delete this saved conversation? This cannot be undone.')) return;
+      S.talks.splice(i, 1); save(); U.speak.log = null; R.speak(); toast('Conversation deleted.');
+    },
+    'talk-review'(t) { const c = S.talks.find((x) => x.id === t.dataset.id); if (c) reviewTalk(c); },
+    'talks-all'() { U.speak.allTalks = !U.speak.allTalks; R.speak(); },
+    /* The big mic: start talking, cut in while the partner speaks, or finish your turn. */
+    talk() {
+      const sp = U.speak;
+      if (Mic.rec) { Mic.stop(); return; }
+      if (sp.busy) return;
+      if (!SR || micBlocked) { dictationHint(); $('#say-input')?.focus(); return; }
+      if (sp.phase === 'partner') { sp.turn++; TTS.stop(); }
+      listenTurn();
+    },
+    'hands-free'(t) { S.handsFree = t.checked; save(); setPhase(U.speak.phase || 'idle'); },
+    'fix-say'(t) {
+      const f = U.speak.summary?.fixes?.[+t.dataset.i]; if (!f) return;
+      TTS.stop();
+      const out = $(`#fix-try-${t.dataset.i}`);
+      Mic.start(t, (txt) => { if (out) out.innerHTML = `<span class="chip accent">Listening… ${esc(txt)}</span>`; }, (said) => {
+        if (!said) { if (out) out.innerHTML = f.try ? tryHTML(f.try) : ''; return; }
+        f.try = { ...compare(f.better, said), heard: said };
+        if (f.try.score >= 80 && !f.passed) { f.passed = true; gain(3, 'spoken', t); }
+        if (out) out.innerHTML = tryHTML(f.try);
+      });
+    },
     'lab-look'(t) { lookup(t.dataset.q); window.scrollTo(0, 0); },
     'lab-save'(t) { toggleSave(t); },
     'lab-open'(t) { const e = S.lexicon.find((x) => x.id === t.dataset.id); if (!e) return; Object.assign(U.lab, { entry: e, tab: 'look', q: e.word, err: '' }); R.lab(); window.scrollTo(0, 0); },
@@ -2420,7 +3006,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
       const en = $('#n-en').value.trim(); if (!en) { toast('Type the English phrase first.'); return; }
       t.disabled = true;
       try {
-        const r = await AI.ask(`${ctxLine}\nThe learner wants to save this English phrase to a flashcard: "${en}". Answer with ONLY JSON: {"en": "the phrase in its most natural base form", "tr": "short Turkish meaning", "ex": "one natural example sentence", "tag": "one of phrasal, collocation, idiom, discourse, situation, mine"}`, 'quick');
+        const r = await AI.ask(`${ctx()}\nThe learner wants to save this English phrase to a flashcard: "${en}". Answer with ONLY JSON: {"en": "the phrase in its most natural base form", "tr": "short meaning in ${Lang.explain()}", "ex": "one natural example sentence", "tag": "one of phrasal, collocation, idiom, discourse, situation, mine"}`, 'quick');
         $('#n-en').value = r.en || en; $('#n-tr').value = r.tr || ''; $('#n-ex').value = r.ex || '';
         if (tagNames[r.tag]) $('#n-tag').value = r.tag;
       } catch (e) { aiError(e); }
@@ -2487,7 +3073,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     'backup-cancel'() { U.cn.pending = null; R.connect(); },
     reset(t) {
       if (!t.dataset.armed) { t.dataset.armed = '1'; t.textContent = 'Click again to erase everything'; setTimeout(() => { if (t.isConnected) { delete t.dataset.armed; t.textContent = 'Erase all progress'; } }, 4000); return; }
-      S = normalize({ name: S.name, voice: S.voice, rate: S.rate }); U.w.queue = null; U.lab.quiz = null; U.lab.entry = null; saveLex(); toast('All progress erased. Fresh start.'); rerender();
+      S = normalize({ name: S.name, voice: S.voice, rate: S.rate, lang: S.lang }); U.w.queue = null; U.lab.quiz = null; U.lab.entry = null; saveLex(); toast('All progress erased. Fresh start.'); rerender();
     }
   };
 
@@ -2522,6 +3108,8 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (t.id === 'w-search') { U.w.q = t.value; renderVList(); }
     if (t.id === 'lex-search') { U.lab.filter = t.value; renderLexList(); }
     if (t.id === 'pb-search') { U.pb.q = t.value; renderPb(); }
+    // Typing by hand while the mic listens: the keyboard wins, the mic stops without sending.
+    if (t.id === 'say-input' && e.isTrusted && Mic.rec && U.speak.phase === 'listening') { U.speak.turn++; Mic.abort(); setPhase('idle'); }
     if (t.id === 'wr-text') { U.wr.text = t.value; const wc = $('#wr-wc'); if (wc) wc.textContent = t.value.split(/\s+/).filter(Boolean).length + ' words'; }
     if (t.id === 'cue-notes') { U.cue.notes = t.value; const wc = $('#cue-wc'); if (wc) wc.textContent = t.value.split(/\s+/).filter(Boolean).length + ' words'; }
     if (t.id === 'nat-in') U.wr.nat = t.value;
@@ -2546,8 +3134,18 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
     if (p === 'name') S.name = t.value.trim().slice(0, 40);
     if (p === 'start' && /^\d{4}-\d{2}-\d{2}$/.test(t.value)) S.start = t.value;
     if (p === 'voice') { S.voice = t.value; fillVoices(); }
+    if (p === 'nvVoice') { S.nvVoice = NV_PICKS.some(([id]) => id === t.value) ? t.value : ''; if (NV.ready()) TTS.speak('Hi! This is how I sound now.'); }
     if (p === 'rate') S.rate = Math.min(1.2, Math.max(0.6, +t.value || 1));
     if (p === 'autoSpeak') S.autoSpeak = t.checked;
+    if (p === 'native' && t.value === '__other') { const f = $('#p-native-other'); if (f) { f.hidden = false; $('#p-native-o')?.focus(); } return; }
+    if (p === 'nativeOther' && !langName(t.value)) { toast('Type the language name in English, letters only.'); return; }
+    if (p === 'native' || p === 'nativeOther' || p === 'lang') {
+      if (p === 'lang') S.lang = langName(t.value); else S.native = langName(t.value);
+      U.lab.recent = []; // cached lookups were written in the old language
+      save(); rerender();
+      toast(`The AI coach now explains in ${Lang.explain()}.`);
+      return;
+    }
     save(); updateChrome();
     if (p === 'start') toast(`Plan updated. You are in Week ${weekNow()}.`);
   });
@@ -2565,17 +3163,23 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "...", "coach": 
   /* ================= Boot ================= */
   $('#nav-m').innerHTML = $('#nav').innerHTML;
   TTS.init();
+  if (S.neural) NV.start(); // already downloaded once: loads from the browser cache
   /* Wait briefly for the coach files so Today renders once, with them. */
   let booted = false;
   const boot = () => {
     if (booted) return;
     booted = true;
+    Tx.sync();
     route();
     updateChrome();
     AI.init();
     Cloud.init();
+    Setup.open();
   };
-  L.load().then((changed) => { if (booted && changed && ['today', 'plan'].includes(current)) R[current](); }).catch(() => {}).finally(boot);
+  L.load().then((changed) => {
+    if (Lang.known()) Setup.close(); // the coach's profile arrived after the question opened
+    if (booted && changed) { if (['today', 'plan'].includes(current)) R[current](); Tx.sync(); Tx.scan(); }
+  }).catch(() => {}).finally(boot);
   setTimeout(boot, 800);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) L.refresh(); });
   addEventListener('focus', () => L.refresh());

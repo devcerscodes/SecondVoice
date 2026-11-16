@@ -357,7 +357,10 @@ window.SV_DATA = (() => {
       watch: '"The car hit to the bike" değil "The car hit the bike" de. Tahmin ettiğin şeyi kesin bilgi gibi söyleme.',
       ava: { skin: '#D9A47C', hair: 'cap', hairColor: '#2A1C14', shirt: '#1F2A44', acc: 'vest', bg: '#DDE2EA' } }
   };
-  scenarios.forEach((s) => Object.assign(s, briefs[s.id] || {}));
+  scenarios.forEach((s) => {
+    Object.assign(s, briefs[s.id] || {});
+    if (s.ava) s.ava.portrait = s.id; // painted portrait: portraits/<id>.jpg
+  });
 
   const freeBrief = {
     name: 'Sam', job: 'An old colleague, over coffee',
@@ -365,7 +368,7 @@ window.SV_DATA = (() => {
     beats: ['Konuyu açar ve ilk fikrini sorar', 'Fikrine karşı bir argüman getirir', 'Kendi hayatından bir örnek ister', 'Sohbeti bir soruyla bağlar'],
     you: ['Fikrini en az iki gerekçeyle savun', 'En az bir kez kibarca karşı çık', 'Sam\'e de en az iki soru sor'],
     watch: 'Kısa cevaplarla geçiştirme. Her cevaba bir örnek ya da kişisel bir detay ekle.',
-    ava: { skin: '#F2C9A5', hair: 'curly', hairColor: '#4A3426', shirt: '#0E7468', acc: 'mug', bg: '#D3EEEA' }
+    ava: { portrait: 'sam', skin: '#F2C9A5', hair: 'curly', hairColor: '#4A3426', shirt: '#0E7468', acc: 'mug', bg: '#D3EEEA' }
   };
 
   /* Phrasebook: ready-made lines for situations you rarely meet, ordered the way the
@@ -519,7 +522,7 @@ window.SV_DATA = (() => {
       ] },
 
     { id: 'hotel', title: 'At the hotel', tr: 'Otelde', scene: null,
-      ava: { skin: '#B57B52', hair: 'long', hairColor: '#2A1C14', shirt: '#24324F', acc: 'lanyard', bg: '#E1E5F0' },
+      ava: { portrait: 'hotel', skin: '#B57B52', hair: 'long', hairColor: '#2A1C14', shirt: '#24324F', acc: 'lanyard', bg: '#E1E5F0' },
       intro: 'Otelde her şey nazik bir ricayla başlar: "Is it possible to...", "Would it be possible to...". Sorunlarda önce durumu söyle, sonra çözüm iste.',
       groups: [
         { t: 'Checking in', tr: 'Giriş', p: [
@@ -556,7 +559,7 @@ window.SV_DATA = (() => {
       banks: [] },
 
     { id: 'transit', title: 'Getting around', tr: 'Taksi, tren, yol tarifi', scene: null,
-      ava: { skin: '#D9A47C', hair: 'short', hairColor: '#1A1A1A', shirt: '#2F5D50', acc: 'none', bg: '#D7EAE4' },
+      ava: { portrait: 'transit', skin: '#D9A47C', hair: 'short', hairColor: '#1A1A1A', shirt: '#2F5D50', acc: 'none', bg: '#D7EAE4' },
       intro: 'Yol sorarken önce özür dile ("Sorry to bother you"), cevabı aldıktan sonra tarifi kendi cümlelerinle tekrar et. Böyle yaparsan yanlış anlama ihtimali azalır.',
       groups: [
         { t: 'In a taxi', tr: 'Takside', p: [
@@ -610,7 +613,7 @@ window.SV_DATA = (() => {
       banks: [] },
 
     { id: 'phone', title: 'Phone calls & bookings', tr: 'Telefon ve randevu', scene: null,
-      ava: { skin: '#F2C9A5', hair: 'bun', hairColor: '#6B3E26', shirt: '#7A1F3D', acc: 'headset', bg: '#F1DCE3' },
+      ava: { portrait: 'phone', skin: '#F2C9A5', hair: 'bun', hairColor: '#6B3E26', shirt: '#7A1F3D', acc: 'headset', bg: '#F1DCE3' },
       intro: 'Telefonda yüz ifadesi ve el hareketi yok, bu yüzden teyit etmek çok önemli. Konuşmanın sonunda tarihi ve saati mutlaka tekrar et.',
       groups: [
         { t: 'Booking & changing', tr: 'Randevu almak ve değiştirmek', p: [
