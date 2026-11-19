@@ -95,3 +95,7 @@ Some app screens (the Word Lab lookup, Write feedback, the role-play chat) need 
 Copyright (C) 2026 devcerscodes
 
 Second Voice is free software under the [GNU Affero General Public License v3.0](LICENSE). Fork it, change it and use it for yourself. If you share a changed version, or run one as a website for others, you must publish your source code under the same license.
+
+Keep the copyright notice on the Preferences page and point its source link at your own repo.
+
+The name "Second Voice" and its logo are not covered by the license. If you publish a fork, give it a different name and logo so people can tell it apart from the original.

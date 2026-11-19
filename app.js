@@ -2,6 +2,7 @@
 (() => {
   'use strict';
   const D = window.SV_DATA;
+  const REPO = 'https://github.com/devcerscodes/SecondVoice'; // forks: keep the notice, point this at your fork
 
   /* ================= Utilities ================= */
   const $ = (s, r = document) => r.querySelector(s);
@@ -2647,7 +2648,8 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
           <h3>Microphone</h3>
           <p class="muted" style="font-size:14px">Mikrofon bu sayfa içinde engelli olabilir: o zaman klavyedeki dikteyi kullan (Mac'te Fn tuşuna iki kez bas, telefonda klavyedeki mikrofon).</p>
         </div>
-      </section>`;
+      </section>
+      <p class="muted" data-notx style="font-size:13px;margin-top:24px">© 2026 devcerscodes · Second Voice is free software: you can share and change it under the <a href="${REPO}/blob/main/LICENSE" target="_blank" rel="noopener">GNU AGPL v3.0</a>. It comes with no warranty. <a href="${REPO}" target="_blank" rel="noopener">Source code</a></p>`;
     fillVoices();
   };
 
