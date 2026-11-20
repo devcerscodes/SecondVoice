@@ -574,41 +574,59 @@
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let micBlocked = false;
   const dictationHint = () => toast('The microphone is blocked inside this page. Use dictation instead: press Fn twice on a Mac, or tap the mic on your phone keyboard, then speak into the text box.', 8000);
-  /* patient: keep listening through short thinking pauses (learners pause mid-sentence) and
-     end the turn after SILENCE_MS of quiet once something was said. */
-  const SILENCE_MS = 1800;
+  /* manual: the learner starts and ends the turn. Pauses, silence and the browser closing the
+     recogniser on its own don't end it: the mic reopens and keeps what was said, until stop(). */
+  const MANUAL_CAP_MS = 5 * 60 * 1000; // safety net if the mic is left on and forgotten
+  const joinWords = (...parts) => parts.join(' ').replace(/\s+/g, ' ').trim();
   const Mic = {
-    rec: null, aborted: false,
+    rec: null, aborted: false, userStop: false,
     start(btn, onText, onDone, o = {}) {
       if (this.rec) { this.stop(); return; }
       if (!SR || micBlocked) { dictationHint(); $('#say-input, #wr-text, #cue-notes, #nat-in')?.focus(); return; }
-      const r = new SR();
       const variant = String(L.profile?.variant || '').toLowerCase();
-      r.lang = variant.startsWith('brit') ? 'en-GB' : 'en-US'; r.interimResults = true; r.continuous = !!o.patient;
-      let fin = '', last = '', quiet = 0, cap = 0;
-      this.aborted = false;
-      r.onresult = (e) => {
-        let interim = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          const t = e.results[i][0].transcript;
-          if (e.results[i].isFinal) fin += (fin && !/\s$/.test(fin) && !/^\s/.test(t) ? ' ' : '') + t; else interim += t;
-        }
-        last = (fin + ' ' + interim).replace(/\s+/g, ' ').trim();
-        onText?.(last);
-        if (o.patient) { clearTimeout(quiet); quiet = setTimeout(() => this.stop(), SILENCE_MS); }
-      };
-      r.onerror = (e) => { if (['not-allowed', 'service-not-allowed', 'audio-capture', 'network'].includes(e.error)) { micBlocked = true; dictationHint(); } };
-      r.onend = () => {
-        clearTimeout(quiet); clearTimeout(cap);
+      const lang = variant.startsWith('brit') ? 'en-GB' : 'en-US';
+      const t0 = Date.now();
+      let base = '', last = '', cap = 0, live = true;
+      this.aborted = false; this.userStop = false;
+      const finish = () => {
+        if (!live) return; live = false;
+        clearTimeout(cap);
         this.rec = null; btn?.classList.remove('live'); onAir(false);
-        if (!this.aborted) onDone?.((fin.trim() || last).trim());
+        if (!this.aborted) onDone?.(last);
+      };
+      const begin = () => {
+        const r = new SR();
+        r.lang = lang; r.interimResults = true; r.continuous = !!o.manual;
+        let sess = '';
+        r.onresult = (e) => {
+          let fin = '', interim = '';
+          for (let i = 0; i < e.results.length; i++) {
+            const t = e.results[i][0].transcript;
+            if (e.results[i].isFinal) fin = joinWords(fin, t); else interim = joinWords(interim, t);
+          }
+          sess = joinWords(fin, interim);
+          last = joinWords(base, sess);
+          onText?.(last);
+        };
+        r.onerror = (e) => { if (['not-allowed', 'service-not-allowed', 'audio-capture', 'network'].includes(e.error)) { micBlocked = true; dictationHint(); } };
+        r.onend = () => {
+          base = joinWords(base, sess); last = base;
+          const keepGoing = o.manual && !this.userStop && !this.aborted && !micBlocked && Date.now() - t0 < MANUAL_CAP_MS;
+          if (keepGoing) {
+            // Stop or abort can land in this short gap, when there is no recogniser to end: finish here then.
+            setTimeout(() => { if (this.rec !== r) return; if (this.userStop || this.aborted) { finish(); return; } try { begin(); } catch { finish(); } }, 120);
+            return;
+          }
+          finish();
+        };
+        r.start(); this.rec = r;
       };
       try {
-        r.start(); this.rec = r; btn?.classList.add('live'); onAir(true);
-        if (o.patient) cap = setTimeout(() => this.stop(), 60000); // one turn is at most a minute
-      } catch { micBlocked = true; dictationHint(); }
+        begin(); btn?.classList.add('live'); onAir(true);
+        if (o.manual) cap = setTimeout(() => this.stop(), MANUAL_CAP_MS);
+      } catch { this.rec = null; micBlocked = true; dictationHint(); }
     },
-    stop() { try { this.rec?.stop(); } catch { /* already stopped */ } },
+    stop() { this.userStop = true; try { this.rec?.stop(); } catch { /* already stopped */ } },
     abort() { if (!this.rec) return; this.aborted = true; try { this.rec.abort(); } catch { /* already stopped */ } }
   };
   const onAir = (on) => $$('.onair').forEach((x) => x.classList.toggle('live', on));
@@ -1785,7 +1803,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     if (S.talks.length > TALKS_MAX) S.talks.length = TALKS_MAX;
     save();
   }
-  /* Stops whatever the scene is doing (voice, mic, the hands-free loop). */
+  /* Stops whatever the scene is doing (voice, mic). */
   function hushScene() { U.speak.turn++; Mic.abort(); TTS.stop(); U.speak.phase = 'idle'; }
   function openScene(sc) {
     hushScene(); queueId++;
@@ -1819,13 +1837,13 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     }
     if (reply && sp.scen === sc) partnerSpeaks(reply, sc);
   }
-  /* The partner speaks in their own voice; then, hands-free, the mic opens for the learner. */
+  /* The partner speaks in their own voice; then it's the learner's turn. The mic waits for them:
+     they tap to start recording and tap again when they're done. */
   function partnerSpeaks(text, sc) {
     const sp = U.speak, turn = ++sp.turn;
     const after = () => {
       if (turn !== sp.turn || sp.scen !== sc || sp.stage !== 'chat' || current !== 'speak') return;
       setPhase('idle');
-      if (S.handsFree) listenTurn();
     };
     if (!S.autoSpeak) { after(); return; }
     setPhase('partner');
@@ -1841,7 +1859,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     Mic.start(btn, (txt) => { ta.value = txt; }, (said) => {
       if (turn !== sp.turn || sp.stage !== 'chat') return;
       if (said) sendLine(); else setPhase('idle');
-    }, { patient: true });
+    }, { manual: true });
     if (!Mic.rec) setPhase('idle');
   }
   /* idle · partner (speaking) · listening · thinking */
@@ -1849,9 +1867,9 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     const sp = U.speak; sp.phase = p;
     const name = esc(sp.scen?.name || 'Your partner');
     const txt = {
-      idle: SR && !micBlocked ? (S.handsFree ? 'Tap the mic and speak, or type.' : 'Tap the mic to speak, or type.') : 'Type your line, or use your keyboard\'s dictation.',
+      idle: SR && !micBlocked ? 'Tap the mic to start recording, or type.' : 'Type your line, or use your keyboard\'s dictation.',
       partner: `${name} is speaking… <span class="muted">tap the mic to cut in</span>`,
-      listening: 'Listening… <span class="muted">pause when you\'re done</span>',
+      listening: 'Recording… <span class="muted">take your time, tap the mic again when you\'re done</span>',
       thinking: `${name} is thinking…`
     }[p] || '';
     const st = $('#talk-state'); if (st) st.innerHTML = txt;
@@ -2173,7 +2191,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
             <div class="row golive-row">
               <button class="btn primary golive" data-act="go-live" ${busy ? 'disabled' : ''}><span class="light"></span>Go on air</button>
               ${D.phrasebook.some((p) => p.scene === sc.id) ? `<button class="btn" data-act="pb-open" data-id="${D.phrasebook.find((p) => p.scene === sc.id).id}">${I.book} Full phrasebook</button>` : ''}
-              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.${SR && S.handsFree ? ' Sonra mikrofon kendiliğinden açılır: konuş, bitince kısa bir sus.' : ''}` : `AI partner ${L.local ? 'bilgisayarındaki agent ile' : 'claude.ai üzerinde'} çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.`}</span>
+              <span class="muted" style="font-size:14px">${AI.state === 'on' ? `${esc(sc.name || 'Your partner')} konuşmayı başlatacak.${SR ? ' Sıra sana gelince mikrofona bas ve konuş; bitirince tekrar bas.' : ''}` : `AI partner ${L.local ? 'bilgisayarındaki agent ile' : 'claude.ai üzerinde'} çalışır. Şimdilik brief ile kendi başına prova yapabilirsin.`}</span>
             </div>
             ${NV.ready() ? '' : `<div class="nv-line" data-nv>${nvStatus()}</div>`}
           </div>
@@ -2200,9 +2218,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
           <section class="card chat" aria-label="Conversation">
             <div class="chat-head"><span class="mini-ava live">${avatar(sc.ava, sc.name || 'Partner')}</span><div style="min-width:0"><b style="font-size:15px;display:block">${esc(sc.name || 'Partner')}</b><span class="muted" style="font-size:13px">${esc(sc.job || '')}</span></div><span class="onair">On air</span><span class="spacer"></span>
               <div class="chat-opts">
-                <label class="row muted"><input type="checkbox" id="auto-speak" data-act="auto-speak"${S.autoSpeak ? ' checked' : ''}> Read replies aloud</label>
-                ${SR ? `<label class="row muted"><input type="checkbox" id="hands-free" data-act="hands-free"${S.handsFree ? ' checked' : ''}> Hands-free</label>` : ''}
-              </div></div>
+                <label class="row muted"><input type="checkbox" id="auto-speak" data-act="auto-speak"${S.autoSpeak ? ' checked' : ''}> Read replies aloud</label>              </div></div>
             <div class="msgs" id="msgs" aria-live="polite"></div>
             <div class="hints" id="hints"></div>
             <form class="composer" data-form="say" data-phase="${esc(sp.phase || 'idle')}">
@@ -2888,7 +2904,6 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
       if (sp.phase === 'partner') { sp.turn++; TTS.stop(); }
       listenTurn();
     },
-    'hands-free'(t) { S.handsFree = t.checked; save(); setPhase(U.speak.phase || 'idle'); },
     'fix-say'(t) {
       const f = U.speak.summary?.fixes?.[+t.dataset.i]; if (!f) return;
       TTS.stop();
