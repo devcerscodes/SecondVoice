@@ -50,12 +50,31 @@ const SYSTEM = 'You are the AI inside Second Voice, an English-learning web app.
 // Faster models for the page: a lookup should not take as long as a coding task. SV_MODEL overrides both.
 const CLAUDE_MODEL = { default: 'sonnet', quick: 'haiku' };
 
+const claudeBase = (tier) => ['-p', '--model', process.env.SV_MODEL || CLAUDE_MODEL[tier] || CLAUDE_MODEL.default,
+  '--tools', '', '--system-prompt', SYSTEM];
+
 const AGENTS = {
   claude: {
     name: 'Claude Code', bin: 'claude',
-    args: (tier) => ['-p', '--output-format', 'text', '--model', process.env.SV_MODEL || CLAUDE_MODEL[tier] || CLAUDE_MODEL.default,
-      '--tools', '', '--system-prompt', SYSTEM],
-    stdin: (prompt) => prompt,
+    // Most of a lookup's wait was Claude Code starting up, above all connecting to the learner's MCP servers.
+    // The page needs none of them, nor slash commands or a saved session.
+    // The process also starts before the request comes: it waits for one stream-json message on stdin.
+    args: (tier) => [...claudeBase(tier), '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence',
+      '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'],
+    stdin: (prompt) => JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n',
+    parse: (out) => {
+      const lines = out.split('\n').filter((l) => l.includes('"result"'));
+      const r = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).reverse().find((x) => x?.type === 'result');
+      if (!r) return null;
+      if (r.is_error) throw new Error(String(r.result || r.subtype || 'error'));
+      return String(r.result || '');
+    },
+    warm: true,
+    // An older Claude Code that does not know these options gets the plain call.
+    legacy: {
+      args: (tier) => [...claudeBase(tier), '--output-format', 'text'],
+      stdin: (prompt) => prompt,
+    },
   },
   codex: {
     name: 'Codex', bin: 'codex',
@@ -104,27 +123,72 @@ fs.mkdirSync(WORK, { recursive: true });
 const MAX_BODY = 64 * 1024, MAX_OUT = 1024 * 1024, TIMEOUT = 120 * 1000, MAX_RUNNING = 3;
 let running = 0, seq = 0;
 
+// Start the agent's process. It reads its prompt only when runAgent() writes to its stdin.
+function spawnAgent(tier) {
+  const outFile = path.join(WORK, `answer-${process.pid}-${++seq}.txt`);
+  const child = spawn(AGENT.bin, AGENT.args(tier, outFile), { cwd: WORK, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const job = { child, tier, outFile, out: '', err: '', exited: false, code: null, startErr: null, onExit: null };
+  const exit = () => { job.exited = true; job.onExit?.(); };
+  child.stdout.on('data', (d) => { if (job.out.length < MAX_OUT) job.out += d; });
+  child.stderr.on('data', (d) => { if (job.err.length < MAX_OUT) job.err += d; });
+  child.on('error', (e) => { job.startErr = e; exit(); });
+  child.on('close', (code) => { job.code = code; exit(); });
+  child.stdin.on('error', () => { /* the child exited early; 'close' reports it */ });
+  return job;
+}
+
+// One started process per model tier waits for the next request, so a request does not pay
+// for the agent's start-up. Only for agents that wait for their input (Claude Code's stream-json).
+const spares = {};
+function spareFor(tier) {
+  const s = spares[tier];
+  delete spares[tier];
+  return s && !s.exited ? s : null;
+}
+function warmUp(tier) {
+  if (!AGENT?.warm || (spares[tier] && !spares[tier].exited)) return;
+  const s = spawnAgent(tier);
+  s.onExit = () => { if (spares[tier] === s) delete spares[tier]; };
+  spares[tier] = s;
+}
+// Close the waiting processes with the server.
+const closeSpares = () => { for (const s of Object.values(spares)) s.child.kill('SIGTERM'); };
+process.on('exit', closeSpares);
+['SIGINT', 'SIGTERM', 'SIGHUP'].forEach((sig) => process.on(sig, () => { closeSpares(); process.exit(0); }));
+
 function runAgent(prompt, tier) {
+  const job = spareFor(tier) || spawnAgent(tier);
   return new Promise((resolve, reject) => {
-    const outFile = path.join(WORK, `answer-${process.pid}-${++seq}.txt`);
-    const child = spawn(AGENT.bin, AGENT.args(tier, outFile), { cwd: WORK, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = '', err = '', done = false;
+    let done = false;
     const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); fn(v); };
-    const timer = setTimeout(() => { child.kill('SIGTERM'); finish(reject, Object.assign(new Error('Your agent took too long to answer.'), { code: 'timeout' })); }, TIMEOUT);
-    child.stdout.on('data', (d) => { if (out.length < MAX_OUT) out += d; });
-    child.stderr.on('data', (d) => { if (err.length < MAX_OUT) err += d; });
-    child.on('error', (e) => finish(reject, Object.assign(new Error(`Could not start ${AGENT.bin}: ${e.message}`), { code: 'agent_failed' })));
-    child.on('close', (code) => {
+    const timer = setTimeout(() => { job.child.kill('SIGTERM'); finish(reject, Object.assign(new Error('Your agent took too long to answer.'), { code: 'timeout' })); }, TIMEOUT);
+    job.onExit = () => {
+      if (job.startErr) return finish(reject, Object.assign(new Error(`Could not start ${AGENT.bin}: ${job.startErr.message}`), { code: 'agent_failed' }));
+      const { out, err, code } = job;
       let text = out;
-      if (AGENT.usesOutFile) { try { text = fs.readFileSync(outFile, 'utf8'); } catch { /* fall back to stdout */ } fs.rm(outFile, { force: true }, () => {}); }
-      if (code === 0 && text.trim()) return finish(resolve, text.trim());
+      if (AGENT.usesOutFile) { try { text = fs.readFileSync(job.outFile, 'utf8'); } catch { /* fall back to stdout */ } fs.rm(job.outFile, { force: true }, () => {}); }
+      let why = '';
+      if (AGENT.parse) { try { text = AGENT.parse(out); } catch (e) { text = null; why = e.message; } }
+      if (code === 0 && text && text.trim()) return finish(resolve, text.trim());
       // Only the last line of the agent's error goes back to the page, never the prompt.
-      const why = (err.trim() || out.trim()).split('\n').filter(Boolean).pop() || `exited with code ${code}`;
-      finish(reject, Object.assign(new Error(why.slice(0, 300)), { code: 'agent_failed' }));
-    });
-    child.stdin.on('error', () => { /* the child exited early; 'close' reports it */ });
-    child.stdin.end(AGENT.stdin(prompt));
+      why = why || (err.trim() || out.trim()).split('\n').filter(Boolean).pop() || `exited with code ${code}`;
+      finish(reject, Object.assign(new Error(why.slice(0, 300)), { code: 'agent_failed', unknownOption: /unknown option|unknown argument/i.test(err) }));
+    };
+    if (job.exited) job.onExit();
+    else job.child.stdin.end(AGENT.stdin(prompt));
   });
+}
+
+async function ask(prompt, tier) {
+  try {
+    return await runAgent(prompt, tier);
+  } catch (e) {
+    if (!e.unknownOption || !AGENT.legacy) throw e;
+    console.log(`[agent] ${AGENT.name} is older than this app expects; using the slower plain call. Updating it makes the page faster.`);
+    Object.assign(AGENT, AGENT.legacy, { parse: null, warm: false, legacy: null });
+    closeSpares();
+    return runAgent(prompt, tier);
+  } finally { warmUp(tier); }
 }
 
 // Only this page may use the bridge. Another site open in the same browser could otherwise make
@@ -151,6 +215,8 @@ async function api(req, res, rel) {
   if (!sameSite(req)) return sendJSON(res, 403, { error: 'Forbidden', code: 'forbidden' });
 
   if (rel === '/api/agent' && req.method === 'GET') {
+    // The page has opened: have a process ready before its first lookup.
+    if (AGENT) warmUp('default');
     return sendJSON(res, 200, AGENT ? { agent: AGENT.id, name: AGENT.name } : { agent: null });
   }
 
@@ -163,7 +229,7 @@ async function api(req, res, rel) {
     running++;
     const t0 = Date.now();
     try {
-      const text = await runAgent(prompt, tier === 'quick' ? 'quick' : 'default');
+      const text = await ask(prompt, tier === 'quick' ? 'quick' : 'default');
       console.log(`[agent] ${AGENT.name} answered in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       return sendJSON(res, 200, { text });
     } catch (e) {
