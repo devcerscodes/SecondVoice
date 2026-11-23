@@ -663,9 +663,13 @@
       if (changed && st === 'on' && U.speak.scen && U.speak.stage === 'chat' && !U.speak.msgs.length && !U.speak.busy) aiTurn();
       if (changed && st === 'on' && U.speak.scen?.needsBrief && !U.speak.briefBusy) makeBrief(U.speak.scen);
     },
-    async ask(input, tier = 'default') {
+    /* onText(textSoFar) is called while the answer is written. Only the local agent streams;
+       elsewhere the answer arrives whole. */
+    async ask(input, tier = 'default', onText) {
       if (!this.s) throw Object.assign(new Error('off'), { code: 'off' });
-      const r = await this.s(input, { cache: false, modelTier: tier });
+      const o = { cache: false, modelTier: tier };
+      if (onText && this.s === localAgent) o.onText = onText;
+      const r = await this.s(input, o);
       return parseJSON(r?.text);
     }
   };
@@ -683,12 +687,68 @@
       r = await fetch('/api/ask', {
         method: 'POST', cache: 'no-store',
         headers: { 'Content-Type': 'application/json', 'X-Second-Voice': '1' },
-        body: JSON.stringify({ prompt: flatPrompt(input), tier: o.modelTier || 'default' })
+        body: JSON.stringify({ prompt: flatPrompt(input), tier: o.modelTier || 'default', stream: !!o.onText })
       });
     } catch { throw Object.assign(new Error('down'), { code: 'agent_down' }); }
+    if (r.ok && o.onText && r.body && (r.headers.get('content-type') || '').includes('ndjson')) return readStream(r, o.onText);
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw Object.assign(new Error(j.error || 'agent'), { code: j.code || 'agent_failed', detail: j.error || '' });
     return { text: j.text };
+  }
+  /* server.js streams one JSON object per line: {d} pieces of text, then {text} or {error, code}. */
+  async function readStream(r, onText) {
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '', acc = '', text = null;
+    const take = (line) => {
+      if (!line.trim()) return;
+      let m; try { m = JSON.parse(line); } catch { return; }
+      if (m.error) throw Object.assign(new Error(m.error), { code: m.code || 'agent_failed', detail: m.error });
+      if (typeof m.d === 'string') { acc += m.d; try { onText(acc); } catch { /* a preview must not break the answer */ } }
+      if (typeof m.text === 'string') text = m.text;
+    };
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) { take(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      }
+      take(buf + dec.decode());
+    } catch (e) {
+      if (e.code) throw e;
+      throw Object.assign(new Error('down'), { code: 'agent_down' });
+    }
+    if (text === null) throw Object.assign(new Error('agent'), { code: 'agent_failed', detail: 'the answer stopped half way' });
+    return { text };
+  }
+  /* The JSON object in an answer that is still being written, closed where it stops.
+     Drops a key or value that has only begun; null until there is something to show. */
+  function partialJSON(t) {
+    t = String(t || '').replace(/```(?:json)?/gi, '');
+    const a = t.indexOf('{'); if (a < 0) return null;
+    t = t.slice(a);
+    for (let tries = 0; tries < 8 && t; tries++) {
+      const stack = [];
+      let inStr = false, esc = false, cut = -1;
+      for (let i = 0; i < t.length; i++) {
+        const c = t[i];
+        if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+        if (c === '"') inStr = true;
+        else if (c === '{' || c === '[') stack.push(c === '{' ? '}' : ']');
+        else if (c === '}' || c === ']') stack.pop();
+        else if (c === ',') cut = i;
+      }
+      let s = t;
+      if (inStr) s = (esc ? s.slice(0, -1) : s) + '"';
+      s = s.replace(/\s+$/, '');
+      if (s.endsWith(':')) s += 'null';
+      else if (s.endsWith(',')) s = s.slice(0, -1);
+      try { return JSON.parse(s + stack.reverse().join('')); } catch { /* cut back to the last complete item */ }
+      if (cut < 0) return null;
+      t = t.slice(0, cut);
+    }
+    return null;
   }
   function parseJSON(t) {
     t = String(t || '').replace(/```(?:json)?/gi, '');
@@ -1006,7 +1066,7 @@ ${JSON.stringify(batch)}`, 'quick');
   const R = {};
   const U = {
     speak: { tab: 'roles', scen: null, stage: 'brief', msgs: [], busy: false, hints: [], summary: null, err: '', briefBusy: false, phase: 'idle', turn: 0 },
-    lab: { tab: 'look', q: '', busy: false, entry: null, err: '', filter: '', hfilter: '', pos: 'all', quiz: null, scr: 0 },
+    lab: { tab: 'look', q: '', busy: false, entry: null, preview: null, live: false, err: '', filter: '', hfilter: '', pos: 'all', quiz: null, scr: 0 },
     pb: { sel: 'doctor', q: '' },
     plan: { area: 'speak' },
     cue: { i: Math.floor(Math.random() * D.cueCards.length), phase: 'idle', left: 60, total: 60, timer: 0, notes: '', res: null, busy: false },
@@ -1343,7 +1403,22 @@ ${JSON.stringify(batch)}`, 'quick');
     const hit = savedOf(q) || S.history.find((e) => (e.lang || ln) === ln && (e.word.toLowerCase() === asked || e.qs?.includes(asked)));
     if (hit) { const item = remember(hit, asked); L.entry = savedOf(hit.word) || item; R.lab(); return; }
     if (AI.state !== 'on') { L.entry = null; L.err = 'off'; R.lab(); return; }
-    L.busy = true; L.entry = null; R.lab();
+    L.busy = true; L.entry = null; L.preview = null; L.live = false; R.lab();
+    // Show the entry while the agent writes it, at most once a frame.
+    let raf = 0, latest = '';
+    const onText = (t) => {
+      latest = t;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!L.busy || L.q !== q || current !== 'lab' || L.tab !== 'look') return;
+        const p = partialJSON(latest);
+        if (!p || p.error || !str(p.word)) return;
+        L.preview = cleanEntry(p, q); L.live = true;
+        clearInterval(L.scr); L.scr = 0;
+        const box = $('#lab-body'); if (box) box.innerHTML = entryHTML(L.preview, true);
+      });
+    };
     try {
       const nl = Lang.native();
       const r = await AI.ask(`You are a learner's dictionary for a ${nl} speaker at B2 level aiming for C1. Look up: "${q}".
@@ -1355,7 +1430,7 @@ Answer with ONLY a JSON object:
  "assoc_tr": "1-2 sentences in ${ln}: what the word evokes, a memory hook, or how it differs from a similar word ${nl} speakers confuse it with",
  "collocations": ["3 to 5 common collocations"], "synonyms": ["2 to 4 synonyms"]}
 Give at most 3 senses, the most common first. In "family" give related forms from the same root, and "" where none exists.
-If the input is not a real word or phrase, answer {"error": "short explanation in ${ln}"}.`);
+If the input is not a real word or phrase, answer {"error": "short explanation in ${ln}"}.`, 'default', onText);
       if (r.error) { L.err = str(r.error, 200); }
       else {
         const e = cleanEntry(r, q); e.lang = ln;
@@ -1364,7 +1439,7 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
         gain(1, 'lookups');
       }
     } catch (e) { aiError(e); L.err = 'fail'; }
-    finally { L.busy = false; clearInterval(L.scr); L.scr = 0; if (current === 'lab') R.lab(); }
+    finally { cancelAnimationFrame(raf); L.busy = false; L.preview = null; clearInterval(L.scr); L.scr = 0; if (current === 'lab') R.lab(); }
   }
   function toggleSave(btn, e = U.lab.entry) {
     if (!e) return;
@@ -1384,21 +1459,23 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
     const head = $('#lab-count'); if (head) head.textContent = `${S.lexicon.length} words saved`;
   }
 
-  function entryHTML(e) {
-    const saved = !!savedOf(e.word);
+  /* partial: the agent is still writing this entry (no saving yet). still: no entrance animation,
+     for an entry that has just been on screen while it was written. */
+  function entryHTML(e, partial = false, still = false) {
+    const saved = !partial && !!savedOf(e.word);
     const famOn = FAMILY.filter(([k]) => e.family?.[k]);
     const posList = [...new Set(e.senses.map((s) => s.pos.toLowerCase()))];
     return `
-      <article class="entry" aria-label="Dictionary entry for ${esc(e.word)}">
+      <article class="entry${partial || still ? ' still' : ''}${partial ? ' writing' : ''}" aria-label="Dictionary entry for ${esc(e.word)}" ${partial ? 'aria-busy="true"' : ''}>
         <div class="entry-head">
           <div class="stack" style="gap:10px">
-            <div class="eyebrow">${e.level ? `<b>${esc(e.level)}</b>` : ''}${e.register ? `<span>·</span><span>${esc(e.register)}</span>` : ''}${saved ? '<span>·</span><span>in your words</span>' : ''}</div>
+            <div class="eyebrow">${e.level ? `<b>${esc(e.level)}</b>` : ''}${e.register ? `<span>·</span><span>${esc(e.register)}</span>` : ''}${saved ? '<span>·</span><span>in your words</span>' : ''}${partial ? `${e.level || e.register ? '<span>·</span>' : ''}<span class="writing-dot">Writing…</span>` : ''}</div>
             <h2 class="entry-word">${esc(e.word)}</h2>
             <div class="row" style="gap:8px">${e.ipa ? `<span class="mono ipa">${esc(e.ipa)}</span>` : ''}${posList.map((p) => `<span class="pos ${posCls(p)}">${esc(posLabel(p))}</span>`).join('')}</div>
           </div>
           <div class="row">
             ${sayBtn(e.word, 'Listen', '', 'btn')}${sayBtn(e.word, 'Slow', 'data-rate="0.6"', 'btn')}
-            <button class="btn save-btn${saved ? ' on' : ''}" id="save-btn" data-act="lab-save" aria-pressed="${saved}">${I.mark}<span>${saved ? ' Saved' : ' Save word'}</span></button>
+            <button class="btn save-btn${saved ? ' on' : ''}" ${partial ? 'disabled' : 'id="save-btn" data-act="lab-save"'} aria-pressed="${saved}">${I.mark}<span>${saved ? ' Saved' : ' Save word'}</span></button>
           </div>
         </div>
         <div class="senses">${e.senses.map((s, i) => `
@@ -1417,10 +1494,10 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
           ${e.collocations.length ? `<div class="stack" style="gap:8px"><span class="mono muted">Collocations</span><div class="row" style="gap:6px">${e.collocations.map((c) => `<button class="chip" data-act="say" data-text="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>` : ''}
           ${e.synonyms.length ? `<div class="stack" style="gap:8px"><span class="mono muted">Synonyms · tap to look up</span><div class="row" style="gap:6px">${e.synonyms.map((c) => `<button class="chip listen" data-act="lab-look" data-q="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>` : ''}
         </div>` : ''}
-        <div class="row" style="border-top:1px solid var(--line);padding-top:16px">
+        ${partial ? `<div class="stack">${[88, 64].map((w) => `<span class="skel" style="width:${w}%"></span>`).join('')}</div>` : `<div class="row" style="border-top:1px solid var(--line);padding-top:16px">
           ${vaultBtn(e.word, e.senses[0]?.tr || '', e.senses[0]?.example || '', 'Add to Vault flashcards')}
           <span class="spacer"></span><span class="mono muted">${S.stats.lookups} lookups so far</span>
-        </div>
+        </div>`}
       </article>`;
   }
   function startScramble(word) {
@@ -1553,8 +1630,9 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
     const L = U.lab;
     let body = '';
     if (L.tab === 'look') {
-      if (L.busy) body = `<article class="entry loading" aria-busy="true"><span class="eyebrow">Looking it up…</span><h2 class="entry-word" id="scr">${esc(L.q)}</h2><div class="stack">${[92, 70, 84, 55].map((w) => `<span class="skel" style="width:${w}%"></span>`).join('')}</div></article>`;
-      else if (L.entry) body = entryHTML(L.entry);
+      if (L.busy && L.preview) body = entryHTML(L.preview, true);
+      else if (L.busy) body = `<article class="entry loading" aria-busy="true"><span class="eyebrow">Looking it up…</span><h2 class="entry-word" id="scr">${esc(L.q)}</h2><div class="stack">${[92, 70, 84, 55].map((w) => `<span class="skel" style="width:${w}%"></span>`).join('')}</div></article>`;
+      else if (L.entry) { body = entryHTML(L.entry, false, L.live); L.live = false; }
       else if (L.err === 'off') body = L.local
         ? `<div class="note">${I.info}<span><b>Lookups need your AI agent.</b> Bilgisayarında Claude Code, Codex ya da Gemini CLI bulunamadı. Birini kurup giriş yap, sonra <code>npm run dev</code>'i yeniden başlat. Kaydettiğin kelimeler burada yine de açılır.</span></div>`
         : `<div class="note">${I.info}<span><b>Lookups need the AI coach.</b> It runs when this page is open on claude.ai. Kaydettiğin kelimeler burada yine de açılır.</span></div>`;
@@ -1600,11 +1678,11 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
         ${S.history.length ? `<div class="row recent"><span class="mono">Recent</span>${S.history.slice(0, 8).map((e) => `<button class="chip" data-act="hist-open" data-w="${esc(e.word)}">${esc(e.word)}</button>`).join('')}</div>` : ''}
       </section>
       <div class="row">${tabs('lab', [['look', 'Look up'], ['hist', `History (${S.history.length})`], ['mine', `My words (${S.lexicon.length})`], ['quiz', 'Quiz']], L.tab)}</div>
-      ${body}`;
+      <div id="lab-body" class="lab-body">${body}</div>`;
     Letters.mount($('#letters'));
     if (L.tab === 'hist') renderHistList();
     if (L.tab === 'mine') renderLexList();
-    if (L.busy) startScramble(L.q);
+    if (L.busy && !L.preview) startScramble(L.q);
   };
 
   /* ================= Plan ================= */

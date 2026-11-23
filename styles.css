@@ -708,6 +708,12 @@ ol.method { margin: 0; padding-left: 22px; display: flex; flex-direction: column
 .save-btn.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .save-btn.on svg { fill: var(--accent); stroke: var(--accent); transform: scale(1.2); animation: markPop .45s cubic-bezier(.3,1.8,.5,1); }
 @keyframes markPop { 0% { transform: scale(.4); } 70% { transform: scale(1.4); } }
+/* An entry shown while the agent writes it: re-drawn many times, so nothing animates in. */
+.lab-body { display: flex; flex-direction: column; gap: 28px; }
+.entry.still, .entry.still *:not(.skel):not(.writing-dot) { animation: none; }
+.writing-dot { color: var(--accent-ink); animation: writingPulse 1.2s ease-in-out infinite; }
+@keyframes writingPulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .writing-dot { animation: none; } }
 .hist-save.on svg { fill: var(--accent); stroke: var(--accent); animation: markPop .45s cubic-bezier(.3,1.8,.5,1); }
 .sense { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 16px; padding: 18px 0; border-top: 1px solid var(--line); animation: senseIn .65s var(--ease) both; animation-delay: calc(var(--d) * 130ms + 150ms); }
 @keyframes senseIn { from { opacity: 0; clip-path: inset(0 100% 0 0); } to { opacity: 1; clip-path: inset(0 0 0 0); } }

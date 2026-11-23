@@ -59,9 +59,15 @@ const AGENTS = {
     // Most of a lookup's wait was Claude Code starting up, above all connecting to the learner's MCP servers.
     // The page needs none of them, nor slash commands or a saved session.
     // The process also starts before the request comes: it waits for one stream-json message on stdin.
+    // Partial messages let the page show an answer while it is being written.
     args: (tier) => [...claudeBase(tier), '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence',
-      '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'],
+      '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'],
     stdin: (prompt) => JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n',
+    // One line of output → the new text in it, if any.
+    delta: (line) => {
+      if (!line.includes('"text_delta"')) return '';
+      try { const d = JSON.parse(line).event?.delta; return d?.type === 'text_delta' ? String(d.text || '') : ''; } catch { return ''; }
+    },
     parse: (out) => {
       const lines = out.split('\n').filter((l) => l.includes('"result"'));
       const r = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).reverse().find((x) => x?.type === 'result');
@@ -127,9 +133,22 @@ let running = 0, seq = 0;
 function spawnAgent(tier) {
   const outFile = path.join(WORK, `answer-${process.pid}-${++seq}.txt`);
   const child = spawn(AGENT.bin, AGENT.args(tier, outFile), { cwd: WORK, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
-  const job = { child, tier, outFile, out: '', err: '', exited: false, code: null, startErr: null, onExit: null };
+  const job = { child, tier, outFile, out: '', err: '', exited: false, code: null, startErr: null, onExit: null, onDelta: null };
   const exit = () => { job.exited = true; job.onExit?.(); };
-  child.stdout.on('data', (d) => { if (job.out.length < MAX_OUT) job.out += d; });
+  // Decode as text so a character split between two chunks stays whole.
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  let pending = '';
+  child.stdout.on('data', (d) => {
+    if (job.out.length < MAX_OUT) job.out += d;
+    if (!AGENT.delta || !job.onDelta) return;
+    pending += d;
+    let i;
+    while ((i = pending.indexOf('\n')) >= 0) {
+      const t = AGENT.delta(pending.slice(0, i));
+      pending = pending.slice(i + 1);
+      if (t) job.onDelta(t);
+    }
+  });
   child.stderr.on('data', (d) => { if (job.err.length < MAX_OUT) job.err += d; });
   child.on('error', (e) => { job.startErr = e; exit(); });
   child.on('close', (code) => { job.code = code; exit(); });
@@ -156,8 +175,9 @@ const closeSpares = () => { for (const s of Object.values(spares)) s.child.kill(
 process.on('exit', closeSpares);
 ['SIGINT', 'SIGTERM', 'SIGHUP'].forEach((sig) => process.on(sig, () => { closeSpares(); process.exit(0); }));
 
-function runAgent(prompt, tier) {
+function runAgent(prompt, tier, onDelta) {
   const job = spareFor(tier) || spawnAgent(tier);
+  job.onDelta = onDelta || null;
   return new Promise((resolve, reject) => {
     let done = false;
     const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); fn(v); };
@@ -179,15 +199,16 @@ function runAgent(prompt, tier) {
   });
 }
 
-async function ask(prompt, tier) {
+// onDelta(text) gets the answer piece by piece while it is written, when the agent can stream.
+async function ask(prompt, tier, onDelta) {
   try {
-    return await runAgent(prompt, tier);
+    return await runAgent(prompt, tier, onDelta);
   } catch (e) {
     if (!e.unknownOption || !AGENT.legacy) throw e;
     console.log(`[agent] ${AGENT.name} is older than this app expects; using the slower plain call. Updating it makes the page faster.`);
-    Object.assign(AGENT, AGENT.legacy, { parse: null, warm: false, legacy: null });
+    Object.assign(AGENT, AGENT.legacy, { parse: null, delta: null, warm: false, legacy: null });
     closeSpares();
-    return runAgent(prompt, tier);
+    return runAgent(prompt, tier, onDelta);
   } finally { warmUp(tier); }
 }
 
@@ -223,17 +244,34 @@ async function api(req, res, rel) {
   if (rel === '/api/ask' && req.method === 'POST') {
     if (!AGENT) return sendJSON(res, 503, { error: 'No AI agent found on this computer.', code: 'no_agent' });
     if (running >= MAX_RUNNING) return sendJSON(res, 429, { error: 'Too many requests at once.', code: 'rate_limited' });
-    let prompt, tier;
-    try { ({ prompt, tier } = JSON.parse(await readBody(req))); } catch { return sendJSON(res, 400, { error: 'Bad request', code: 'bad_request' }); }
+    let prompt, tier, stream;
+    try { ({ prompt, tier, stream } = JSON.parse(await readBody(req))); } catch { return sendJSON(res, 400, { error: 'Bad request', code: 'bad_request' }); }
     if (typeof prompt !== 'string' || !prompt.trim()) return sendJSON(res, 400, { error: 'Empty prompt', code: 'bad_request' });
+    tier = tier === 'quick' ? 'quick' : 'default';
     running++;
-    const t0 = Date.now();
+    const t0 = Date.now(), secs = () => ((Date.now() - t0) / 1000).toFixed(1);
+    // stream: true answers with one JSON object per line: {"d": new text}…, then {"text": the whole answer}
+    // or {"error", "code"}. Agents that cannot stream send only the last line.
+    if (stream) {
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store' });
+      const line = (o) => { if (!res.writableEnded) res.write(JSON.stringify(o) + '\n'); };
+      let first = 0;
+      try {
+        const text = await ask(prompt, tier, (d) => { first = first || Date.now(); line({ d }); });
+        console.log(`[agent] ${AGENT.name} answered in ${secs()}s${first ? ` (first words after ${((first - t0) / 1000).toFixed(1)}s)` : ''}`);
+        line({ text });
+      } catch (e) {
+        console.error(`[agent] ${AGENT.name} failed after ${secs()}s: ${e.message}`);
+        line({ error: e.message, code: e.code || 'agent_failed' });
+      } finally { running--; res.end(); }
+      return;
+    }
     try {
-      const text = await ask(prompt, tier === 'quick' ? 'quick' : 'default');
-      console.log(`[agent] ${AGENT.name} answered in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      const text = await ask(prompt, tier);
+      console.log(`[agent] ${AGENT.name} answered in ${secs()}s`);
       return sendJSON(res, 200, { text });
     } catch (e) {
-      console.error(`[agent] ${AGENT.name} failed after ${((Date.now() - t0) / 1000).toFixed(1)}s: ${e.message}`);
+      console.error(`[agent] ${AGENT.name} failed after ${secs()}s: ${e.message}`);
       return sendJSON(res, e.code === 'timeout' ? 504 : 502, { error: e.message, code: e.code || 'agent_failed' });
     } finally { running--; }
   }
