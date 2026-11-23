@@ -142,11 +142,12 @@
   /* ================= State ================= */
   const LS = 'second-voice:v1';
   const TALKS_MAX = 40; // saved role-play conversations, newest first
+  const HIST_MAX = 200; // Word Lab lookups kept with their full entry, newest first
   const fresh = () => ({
     v: 1, name: '', start: todayKey(), rate: 1, rateV: 2, voice: '', autoSpeak: true, lang: '', native: '',
     neural: false, nvVoice: '', handsFree: true, talks: [],
     days: {}, goals: {}, cards: {}, custom: [], scenesDone: {}, trapBest: 0,
-    lexicon: [], lexUpdated: 0, quizBest: 0,
+    lexicon: [], history: [], lexUpdated: 0, quizBest: 0,
     stats: { spoken: 0, reviewed: 0, shadowed: 0, pairs: 0, traps: 0, written: 0, scenes: 0, lookups: 0, quizzed: 0 },
     updated: 0
   });
@@ -156,6 +157,8 @@
     for (const k of ['days', 'goals', 'cards', 'scenesDone']) if (!o[k] || typeof o[k] !== 'object' || Array.isArray(o[k])) o[k] = {};
     if (!Array.isArray(o.custom)) o.custom = [];
     if (!Array.isArray(o.lexicon)) o.lexicon = [];
+    if (!Array.isArray(o.history)) o.history = [];
+    o.history = o.history.filter((e) => e && typeof e.word === 'string' && Array.isArray(e.senses)).slice(0, HIST_MAX);
     if (!Array.isArray(o.talks)) o.talks = [];
     o.talks = o.talks.filter((t) => t && typeof t.id === 'string' && Array.isArray(t.msgs)).slice(0, TALKS_MAX);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(o.start)) o.start = todayKey();
@@ -179,7 +182,7 @@
   function saveLex() { S.lexUpdated = Date.now(); Cloud.lexDirty = true; save(); }
 
   /* Per-person state in the artifact's db, when the page runs on claude.ai.
-     The word collection lives in its own document so it can grow. */
+     The word collection and the lookup history live in their own document so they can grow. */
   const Cloud = {
     ref: null, lexRef: null, lexDirty: false, busy: false, again: false, t: 0, state: 'local', who: '',
     async init() {
@@ -201,16 +204,19 @@
         if (snap.exists) {
           const remote = snap.data() || {};
           if ((remote.updated || 0) > (S.updated || 0)) {
-            const lex = S.lexicon, lu = S.lexUpdated;
+            const lex = S.lexicon, hist = S.history, lu = S.lexUpdated;
             S = normalize(JSON.parse(JSON.stringify(remote)));
-            S.lexicon = lex; S.lexUpdated = lu; changed = true;
+            S.lexicon = lex; S.history = hist; S.lexUpdated = lu; changed = true;
           } else if ((S.updated || 0) > (remote.updated || 0)) this.queue();
         } else if (S.updated) this.queue();
         if (lsnap.exists) {
           const rl = lsnap.data() || {};
-          if ((rl.updated || 0) > (S.lexUpdated || 0) && Array.isArray(rl.items)) { S.lexicon = JSON.parse(JSON.stringify(rl.items)); S.lexUpdated = rl.updated; changed = true; }
+          if ((rl.updated || 0) > (S.lexUpdated || 0) && Array.isArray(rl.items)) {
+            const o = normalize({ lexicon: JSON.parse(JSON.stringify(rl.items)), history: JSON.parse(JSON.stringify(rl.history || [])) });
+            S.lexicon = o.lexicon; S.history = o.history; S.lexUpdated = rl.updated; changed = true;
+          }
           else if ((S.lexUpdated || 0) > (rl.updated || 0)) { this.lexDirty = true; this.queue(); }
-        } else if (S.lexicon.length) { this.lexDirty = true; this.queue(); }
+        } else if (S.lexicon.length || S.history.length) { this.lexDirty = true; this.queue(); }
         if (changed) { writeLocal(); rerender(); }
         if (Lang.known()) Setup.close(); // answered on another device
         this.set('cloud');
@@ -225,11 +231,11 @@
       if (this.busy) { this.again = true; return; }
       this.busy = true;
       try {
-        const { lexicon, ...rest } = S;
+        const { lexicon, history, ...rest } = S;
         await this.ref.set(JSON.parse(JSON.stringify(rest)));
         if (this.lexDirty && this.lexRef) {
           const mark = S.lexUpdated;
-          await this.lexRef.set({ items: JSON.parse(JSON.stringify(lexicon)), updated: mark || Date.now() });
+          await this.lexRef.set({ items: JSON.parse(JSON.stringify(lexicon)), history: JSON.parse(JSON.stringify(history)), updated: mark || Date.now() });
           if (S.lexUpdated === mark) this.lexDirty = false;
         }
         this.set('cloud');
@@ -883,7 +889,6 @@ ${JSON.stringify(batch)}`, 'quick');
         if (!name) { toast(sel.value === '__other' ? 'Type the language name in English, letters only.' : 'Choose your native language.'); (sel.value === '__other' ? other : sel).focus(); return; }
         S.native = name;
         S.lang = $('#su-explain', el).value === 'English' ? 'English' : '';
-        U.lab.recent = [];
         save();
         this.close();
         rerender();
@@ -1001,7 +1006,7 @@ ${JSON.stringify(batch)}`, 'quick');
   const R = {};
   const U = {
     speak: { tab: 'roles', scen: null, stage: 'brief', msgs: [], busy: false, hints: [], summary: null, err: '', briefBusy: false, phase: 'idle', turn: 0 },
-    lab: { tab: 'look', q: '', busy: false, entry: null, err: '', recent: [], filter: '', pos: 'all', quiz: null, scr: 0 },
+    lab: { tab: 'look', q: '', busy: false, entry: null, err: '', filter: '', hfilter: '', pos: 'all', quiz: null, scr: 0 },
     pb: { sel: 'doctor', q: '' },
     plan: { area: 'speak' },
     cue: { i: Math.floor(Math.random() * D.cueCards.length), phase: 'idle', left: 60, total: 60, timer: 0, notes: '', res: null, busy: false },
@@ -1315,16 +1320,32 @@ ${JSON.stringify(batch)}`, 'quick');
   }
   const savedOf = (word) => S.lexicon.find((e) => e.word.toLowerCase() === String(word).toLowerCase());
 
+  /* Every lookup goes into S.history with its full entry, so the learner can come back to it
+     and the same word opens at once, without asking the AI again. */
+  function remember(e, asked) {
+    const k = e.word.toLowerCase();
+    const old = S.history.find((x) => x.word.toLowerCase() === k);
+    const { saved, right, wrong, at, n, qs, ...data } = e;
+    const item = {
+      ...data, lang: e.lang || old?.lang || Lang.explain(),
+      qs: [...new Set([...(old?.qs || []), asked])].filter((x) => x && x !== k).slice(0, 5), // other spellings that led here
+      at: Date.now(), n: (old?.n || 0) + 1
+    };
+    S.history = [item, ...S.history.filter((x) => x !== old)].slice(0, HIST_MAX);
+    saveLex();
+    return item;
+  }
   async function lookup(q) {
     q = str(q, 80); if (!q) return;
-    const L = U.lab;
+    const L = U.lab, asked = q.toLowerCase(), ln = Lang.explain();
     L.q = q; L.tab = 'look'; L.err = '';
-    const hit = savedOf(q) || L.recent.find((e) => e.word.toLowerCase() === q.toLowerCase() || e._q === q.toLowerCase());
-    if (hit) { L.entry = hit; R.lab(); return; }
+    // An entry written in another explanation language is looked up again.
+    const hit = savedOf(q) || S.history.find((e) => (e.lang || ln) === ln && (e.word.toLowerCase() === asked || e.qs?.includes(asked)));
+    if (hit) { const item = remember(hit, asked); L.entry = savedOf(hit.word) || item; R.lab(); return; }
     if (AI.state !== 'on') { L.entry = null; L.err = 'off'; R.lab(); return; }
     L.busy = true; L.entry = null; R.lab();
     try {
-      const ln = Lang.explain(), nl = Lang.native();
+      const nl = Lang.native();
       const r = await AI.ask(`You are a learner's dictionary for a ${nl} speaker at B2 level aiming for C1. Look up: "${q}".
 It may be a single word, a phrasal verb, an idiom or a collocation. If it is not English (for example a ${nl} word), choose the most natural English equivalent and look that up instead. If it is misspelled, correct it.
 Answer with ONLY a JSON object:
@@ -1337,22 +1358,23 @@ Give at most 3 senses, the most common first. In "family" give related forms fro
 If the input is not a real word or phrase, answer {"error": "short explanation in ${ln}"}.`);
       if (r.error) { L.err = str(r.error, 200); }
       else {
-        const e = cleanEntry(r, q); e._q = q.toLowerCase();
-        L.entry = savedOf(e.word) || e;
-        L.recent = [e, ...L.recent.filter((x) => x.word.toLowerCase() !== e.word.toLowerCase())].slice(0, 10);
+        const e = cleanEntry(r, q); e.lang = ln;
+        const item = remember(e, asked);
+        L.entry = savedOf(e.word) || item;
         gain(1, 'lookups');
       }
     } catch (e) { aiError(e); L.err = 'fail'; }
     finally { L.busy = false; clearInterval(L.scr); L.scr = 0; if (current === 'lab') R.lab(); }
   }
-  function toggleSave(btn) {
-    const e = U.lab.entry; if (!e) return;
+  function toggleSave(btn, e = U.lab.entry) {
+    if (!e) return;
     const ex = savedOf(e.word);
     if (ex) { S.lexicon = S.lexicon.filter((x) => x !== ex); toast(`Removed “${e.word}” from your words.`); }
     else {
-      const { _q, ...clean } = e;
-      const item = { ...clean, saved: todayKey() };
-      S.lexicon.unshift(item); U.lab.entry = item;
+      const { at, n, qs, lang, ...clean } = e;
+      const item = { right: 0, wrong: 0, ...clean, saved: todayKey() };
+      S.lexicon.unshift(item);
+      if (e === U.lab.entry) U.lab.entry = item;
       gain(3, null, btn);
       toast(S.lexicon.length >= 4 ? `Saved. ${S.lexicon.length} words ready for a quiz.` : `Saved. ${4 - S.lexicon.length} more to unlock quizzes.`);
     }
@@ -1432,6 +1454,30 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
       && (pos === 'all' || e.senses.some((s) => posCls(s.pos) === pos)));
     box.innerHTML = list.length ? list.map(lexCard).join('') : `<div class="empty" style="grid-column:1/-1"><h3>${S.lexicon.length ? 'No match' : 'Your collection is empty'}</h3><p>${S.lexicon.length ? 'Aramayı değiştir.' : 'Bir kelime ara ve "Save word" ile buraya ekle.'}</p></div>`;
   }
+
+  const lookedAt = (ts) => {
+    const d = new Date(+ts || 0), k = keyOf(d), y = new Date(); y.setDate(y.getDate() - 1);
+    return k === todayKey() ? 'today' : k === keyOf(y) ? 'yesterday' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+  function histCard(e, i) {
+    const saved = !!savedOf(e.word);
+    return `<div class="wcard" style="--i:${i}">
+      <button class="wcard-main" data-act="hist-open" data-w="${esc(e.word)}">
+        <span class="row" style="gap:5px">${[...new Set(e.senses.map((s) => s.pos.toLowerCase()))].slice(0, 3).map((p) => `<span class="pos ${posCls(p)}">${esc(posLabel(p))}</span>`).join('')}</span>
+        <span class="w">${esc(e.word)}</span>
+        <span class="tr">${esc(e.senses[0]?.tr || '')}</span>
+      </button>
+      <div class="row" style="gap:8px;flex-wrap:nowrap"><span class="mono muted" title="Looked up ${e.n || 1} time${e.n > 1 ? 's' : ''}">${lookedAt(e.at)}${e.n > 1 ? ` · ${e.n}×` : ''}</span><span class="spacer"></span>
+        ${sayBtn(e.word, '', '', 'btn ghost icon-btn sm')}<button class="btn ghost icon-btn sm hist-save${saved ? ' on' : ''}" data-act="hist-save" data-w="${esc(e.word)}" aria-pressed="${saved}" aria-label="${saved ? 'Remove' : 'Save'} ${esc(e.word)} ${saved ? 'from' : 'to'} your words" title="${saved ? 'In your words' : 'Save to your words'}">${I.mark}</button><button class="btn ghost icon-btn sm" data-act="hist-del" data-w="${esc(e.word)}" aria-label="Remove ${esc(e.word)} from history">${I.trash}</button></div>
+    </div>`;
+  }
+  function renderHistList() {
+    const box = $('#hist-list'); if (!box) return;
+    const q = U.lab.hfilter.trim().toLowerCase();
+    const list = S.history.filter((e) => !q || (e.word + ' ' + (e.qs || []).join(' ') + ' ' + e.senses.map((s) => s.tr + ' ' + s.en).join(' ')).toLowerCase().includes(q));
+    box.innerHTML = list.length ? list.map(histCard).join('') : `<div class="empty" style="grid-column:1/-1"><h3>No match</h3><p>Aramayı değiştir.</p></div>`;
+  }
+  const histOf = (word) => S.history.find((e) => e.word === word);
 
   /* Quiz built from the saved words; weak words come up first */
   const wordRe = (w) => new RegExp('\\b' + w.replace(/[.*+?^$()|[\]\\{}]/g, '\\$&') + '\\b', 'i');
@@ -1530,6 +1576,12 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
             </ul>
           </div>
         </section>`;
+    } else if (L.tab === 'hist') {
+      body = S.history.length
+        ? `<div class="row"><input class="input" id="hist-search" placeholder="Search your lookups" value="${esc(L.hfilter)}" style="flex:1;min-width:200px" aria-label="Search your lookups"><button class="btn ghost" data-act="hist-clear">${I.trash} Clear history</button></div>
+          <p class="muted">Aradığın her kelime burada kalır. Açınca anında gelir, yapay zekâya yeniden sorulmaz. ${I.mark.replace('<svg', '<svg style="width:14px;height:14px;vertical-align:-2px"')} ile <b>My words</b>'e ekle, quiz'e girsin.</p>
+          <section class="wgrid" id="hist-list"></section>`
+        : `<section class="card empty"><h3>No lookups yet</h3><p>Aradığın her kelime burada birikir; sonra tekrar açabilir, kaydedip quiz'e ekleyebilirsin.</p><div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" data-act="tab" data-group="lab" data-tab="look">Look up a word</button></div></section>`;
     } else if (L.tab === 'mine') {
       body = `<div class="row"><input class="input" id="lex-search" placeholder="Search your words" value="${esc(L.filter)}" style="flex:1;min-width:200px" aria-label="Search your words"></div>
         <div class="row">${[['all', 'All'], ['pos-n', 'Nouns'], ['pos-v', 'Verbs'], ['pos-a', 'Adjectives'], ['pos-d', 'Adverbs'], ['pos-x', 'Phrases']].map(([k, n]) => `<button class="chip" aria-pressed="${k === L.pos}" data-act="lab-pos" data-id="${k}">${n}</button>`).join('')}</div>
@@ -1545,11 +1597,12 @@ If the input is not a real word or phrase, answer {"error": "short explanation i
           <input id="lab-q" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. reluctant, come across, aslında" value="${esc(L.tab === 'look' ? L.q : '')}" aria-label="Word to look up">
           <button class="btn primary" type="submit" ${L.busy ? 'disabled' : ''}>${L.busy ? 'Looking…' : 'Look up'}</button>
         </form>
-        ${L.recent.length ? `<div class="row recent"><span class="mono">Recent</span>${L.recent.slice(0, 8).map((e) => `<button class="chip" data-act="lab-look" data-q="${esc(e.word)}">${esc(e.word)}</button>`).join('')}</div>` : ''}
+        ${S.history.length ? `<div class="row recent"><span class="mono">Recent</span>${S.history.slice(0, 8).map((e) => `<button class="chip" data-act="hist-open" data-w="${esc(e.word)}">${esc(e.word)}</button>`).join('')}</div>` : ''}
       </section>
-      <div class="row">${tabs('lab', [['look', 'Look up'], ['mine', `My words (${S.lexicon.length})`], ['quiz', 'Quiz']], L.tab)}</div>
+      <div class="row">${tabs('lab', [['look', 'Look up'], ['hist', `History (${S.history.length})`], ['mine', `My words (${S.lexicon.length})`], ['quiz', 'Quiz']], L.tab)}</div>
       ${body}`;
     Letters.mount($('#letters'));
+    if (L.tab === 'hist') renderHistList();
     if (L.tab === 'mine') renderLexList();
     if (L.busy) startScramble(L.q);
   };
@@ -2924,6 +2977,29 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
       const head = $('#lab-count'); if (head) head.textContent = `${S.lexicon.length} words saved`;
       toast(`Removed “${e.word}”.`);
     },
+    'hist-open'(t) {
+      const e = histOf(t.dataset.w); if (!e) { lookup(t.dataset.w); window.scrollTo(0, 0); return; }
+      Object.assign(U.lab, { entry: savedOf(e.word) || e, tab: 'look', q: e.word, err: '' }); R.lab(); window.scrollTo(0, 0);
+    },
+    'hist-save'(t) {
+      const e = histOf(t.dataset.w); if (!e) return;
+      toggleSave(t, savedOf(e.word) || e);
+      const on = !!savedOf(e.word);
+      t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); t.title = on ? 'In your words' : 'Save to your words';
+      t.setAttribute('aria-label', `${on ? 'Remove' : 'Save'} ${e.word} ${on ? 'from' : 'to'} your words`);
+      const tab = $('[data-act="tab"][data-group="lab"][data-tab="mine"]'); if (tab) tab.textContent = `My words (${S.lexicon.length})`;
+    },
+    'hist-del'(t) {
+      const e = histOf(t.dataset.w); if (!e) return;
+      S.history = S.history.filter((x) => x !== e); saveLex();
+      if (!S.history.length) { R.lab(); return; }
+      renderHistList();
+      const tab = $('[data-act="tab"][data-group="lab"][data-tab="hist"]'); if (tab) tab.textContent = `History (${S.history.length})`;
+    },
+    'hist-clear'() {
+      if (!confirm(`Clear all ${S.history.length} lookups from your history? Your saved words stay.`)) return;
+      S.history = []; saveLex(); R.lab(); toast('History cleared. Your saved words are still there.');
+    },
     'lab-pos'(t) { U.lab.pos = t.dataset.id; $$('[data-act="lab-pos"]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.id === U.lab.pos)); renderLexList(); },
     'quiz-start'(t) {
       const qz = buildQuiz(+t.dataset.n || 10);
@@ -3124,6 +3200,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     const t = e.target;
     if (t.id === 'w-search') { U.w.q = t.value; renderVList(); }
     if (t.id === 'lex-search') { U.lab.filter = t.value; renderLexList(); }
+    if (t.id === 'hist-search') { U.lab.hfilter = t.value; renderHistList(); }
     if (t.id === 'pb-search') { U.pb.q = t.value; renderPb(); }
     // Typing by hand while the mic listens: the keyboard wins, the mic stops without sending.
     if (t.id === 'say-input' && e.isTrusted && Mic.rec && U.speak.phase === 'listening') { U.speak.turn++; Mic.abort(); setPhase('idle'); }
@@ -3158,8 +3235,7 @@ Answer with ONLY a JSON object and nothing around it: {"reply": "..."}`;
     if (p === 'nativeOther' && !langName(t.value)) { toast('Type the language name in English, letters only.'); return; }
     if (p === 'native' || p === 'nativeOther' || p === 'lang') {
       if (p === 'lang') S.lang = langName(t.value); else S.native = langName(t.value);
-      U.lab.recent = []; // cached lookups were written in the old language
-      save(); rerender();
+      save(); rerender(); // history entries in the old language are looked up again when asked for
       toast(`The AI coach now explains in ${Lang.explain()}.`);
       return;
     }
